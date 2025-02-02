@@ -6,12 +6,17 @@
 package io.opentelemetry.exporter.otlp.testing.internal;
 
 import io.grpc.ManagedChannel;
-import io.opentelemetry.exporter.internal.retry.RetryPolicy;
-import io.opentelemetry.exporter.internal.retry.RetryUtil;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporterBuilder;
+import io.opentelemetry.sdk.common.export.ProxyOptions;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.X509TrustManager;
 
 /** Wrapper of {@link OtlpGrpcSpanExporterBuilder} for use in integration tests. */
 final class GrpcSpanExporterBuilderWrapper implements TelemetryExporterBuilder<SpanData> {
@@ -40,6 +45,18 @@ final class GrpcSpanExporterBuilderWrapper implements TelemetryExporterBuilder<S
   }
 
   @Override
+  public TelemetryExporterBuilder<SpanData> setConnectTimeout(long timeout, TimeUnit unit) {
+    builder.setConnectTimeout(timeout, unit);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<SpanData> setConnectTimeout(Duration timeout) {
+    builder.setConnectTimeout(timeout);
+    return this;
+  }
+
+  @Override
   public TelemetryExporterBuilder<SpanData> setCompression(String compression) {
     builder.setCompression(compression);
     return this;
@@ -48,6 +65,13 @@ final class GrpcSpanExporterBuilderWrapper implements TelemetryExporterBuilder<S
   @Override
   public TelemetryExporterBuilder<SpanData> addHeader(String key, String value) {
     builder.addHeader(key, value);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<SpanData> setHeaders(
+      Supplier<Map<String, String>> headerSupplier) {
+    builder.setHeaders(headerSupplier);
     return this;
   }
 
@@ -65,15 +89,27 @@ final class GrpcSpanExporterBuilderWrapper implements TelemetryExporterBuilder<S
   }
 
   @Override
-  public TelemetryExporterBuilder<SpanData> setRetryPolicy(RetryPolicy retryPolicy) {
-    RetryUtil.setRetryPolicyOnDelegate(builder, retryPolicy);
+  public TelemetryExporterBuilder<SpanData> setSslContext(
+      SSLContext sslContext, X509TrustManager trustManager) {
+    builder.setSslContext(sslContext, trustManager);
     return this;
   }
 
   @Override
+  public TelemetryExporterBuilder<SpanData> setRetryPolicy(@Nullable RetryPolicy retryPolicy) {
+    builder.setRetryPolicy(retryPolicy);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<SpanData> setProxyOptions(ProxyOptions proxyOptions) {
+    throw new UnsupportedOperationException("ProxyOptions are not supported for gRPC");
+  }
+
+  @Override
   @SuppressWarnings("deprecation") // testing deprecated functionality
-  public TelemetryExporterBuilder<SpanData> setChannel(ManagedChannel channel) {
-    builder.setChannel(channel);
+  public TelemetryExporterBuilder<SpanData> setChannel(Object channel) {
+    builder.setChannel((ManagedChannel) channel);
     return this;
   }
 

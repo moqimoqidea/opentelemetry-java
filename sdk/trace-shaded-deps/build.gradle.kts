@@ -1,7 +1,7 @@
 plugins {
   id("otel.java-conventions")
 
-  id("com.github.johnrengelman.shadow")
+  id("com.gradleup.shadow")
 }
 
 // This project is not published, it is bundled into :sdk:trace
@@ -20,7 +20,7 @@ tasks {
     relocate("org.jctools", "io.opentelemetry.internal.shaded.jctools")
   }
 
-  val extractShadowJar by registering(Copy::class) {
+  register<Copy>("extractShadowJar") {
     dependsOn(shadowJar)
     from(zipTree(shadowJar.get().archiveFile))
     into("build/extracted/shadow")

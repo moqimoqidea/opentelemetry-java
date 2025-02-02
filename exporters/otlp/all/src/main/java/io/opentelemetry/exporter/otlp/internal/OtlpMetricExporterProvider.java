@@ -5,12 +5,11 @@
 
 package io.opentelemetry.exporter.otlp.internal;
 
-import static io.opentelemetry.exporter.internal.otlp.OtlpConfigUtil.DATA_TYPE_METRICS;
-import static io.opentelemetry.exporter.internal.otlp.OtlpConfigUtil.PROTOCOL_GRPC;
-import static io.opentelemetry.exporter.internal.otlp.OtlpConfigUtil.PROTOCOL_HTTP_PROTOBUF;
+import static io.opentelemetry.exporter.otlp.internal.OtlpConfigUtil.DATA_TYPE_METRICS;
+import static io.opentelemetry.exporter.otlp.internal.OtlpConfigUtil.PROTOCOL_GRPC;
+import static io.opentelemetry.exporter.otlp.internal.OtlpConfigUtil.PROTOCOL_HTTP_PROTOBUF;
 
-import io.opentelemetry.exporter.internal.otlp.OtlpConfigUtil;
-import io.opentelemetry.exporter.internal.retry.RetryUtil;
+import io.opentelemetry.exporter.internal.ExporterBuilderUtil;
 import io.opentelemetry.exporter.otlp.http.metrics.OtlpHttpMetricExporter;
 import io.opentelemetry.exporter.otlp.http.metrics.OtlpHttpMetricExporterBuilder;
 import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
@@ -28,6 +27,7 @@ import io.opentelemetry.sdk.metrics.export.MetricExporter;
  * at any time.
  */
 public class OtlpMetricExporterProvider implements ConfigurableMetricExporterProvider {
+
   @Override
   public MetricExporter createExporter(ConfigProperties config) {
     String protocol = OtlpConfigUtil.getOtlpProtocol(DATA_TYPE_METRICS, config);
@@ -44,10 +44,11 @@ public class OtlpMetricExporterProvider implements ConfigurableMetricExporterPro
           builder::setTimeout,
           builder::setTrustedCertificates,
           builder::setClientTls,
-          retryPolicy -> RetryUtil.setRetryPolicyOnDelegate(builder, retryPolicy));
-      OtlpConfigUtil.configureOtlpAggregationTemporality(
+          builder::setRetryPolicy,
+          builder::setMemoryMode);
+      ExporterBuilderUtil.configureOtlpAggregationTemporality(
           config, builder::setAggregationTemporalitySelector);
-      OtlpConfigUtil.configureOtlpHistogramDefaultAggregation(
+      ExporterBuilderUtil.configureOtlpHistogramDefaultAggregation(
           config, builder::setDefaultAggregationSelector);
 
       return builder.build();
@@ -63,10 +64,11 @@ public class OtlpMetricExporterProvider implements ConfigurableMetricExporterPro
           builder::setTimeout,
           builder::setTrustedCertificates,
           builder::setClientTls,
-          retryPolicy -> RetryUtil.setRetryPolicyOnDelegate(builder, retryPolicy));
-      OtlpConfigUtil.configureOtlpAggregationTemporality(
+          builder::setRetryPolicy,
+          builder::setMemoryMode);
+      ExporterBuilderUtil.configureOtlpAggregationTemporality(
           config, builder::setAggregationTemporalitySelector);
-      OtlpConfigUtil.configureOtlpHistogramDefaultAggregation(
+      ExporterBuilderUtil.configureOtlpHistogramDefaultAggregation(
           config, builder::setDefaultAggregationSelector);
 
       return builder.build();

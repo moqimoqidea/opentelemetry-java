@@ -5,6 +5,7 @@
 
 package io.opentelemetry.exporter.otlp.testing.internal;
 
+import static org.assertj.core.api.Assertions.as;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -15,6 +16,7 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.linecorp.armeria.common.HttpRequest;
+import com.linecorp.armeria.common.TlsKeyPair;
 import com.linecorp.armeria.common.grpc.protocol.ArmeriaStatusException;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.ServiceRequestContext;
@@ -23,10 +25,15 @@ import com.linecorp.armeria.server.logging.LoggingService;
 import com.linecorp.armeria.testing.junit5.server.SelfSignedCertificateExtension;
 import com.linecorp.armeria.testing.junit5.server.ServerExtension;
 import io.github.netmikey.logunit.api.LogCapturer;
-import io.opentelemetry.exporter.internal.grpc.OkHttpGrpcExporter;
-import io.opentelemetry.exporter.internal.grpc.UpstreamGrpcExporter;
+import io.grpc.ManagedChannel;
+import io.opentelemetry.exporter.internal.FailedExportException;
+import io.opentelemetry.exporter.internal.TlsUtil;
+import io.opentelemetry.exporter.internal.compression.GzipCompressor;
+import io.opentelemetry.exporter.internal.grpc.GrpcExporter;
+import io.opentelemetry.exporter.internal.grpc.GrpcResponse;
+import io.opentelemetry.exporter.internal.grpc.MarshalerServiceStub;
 import io.opentelemetry.exporter.internal.marshal.Marshaler;
-import io.opentelemetry.exporter.internal.retry.RetryPolicy;
+import io.opentelemetry.exporter.otlp.testing.internal.compressor.Base64Compressor;
 import io.opentelemetry.internal.testing.slf4j.SuppressLogger;
 import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest;
 import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse;
@@ -35,11 +42,14 @@ import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.cert.CertificateEncodingException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -54,6 +64,13 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509KeyManager;
+import javax.net.ssl.X509TrustManager;
+import org.assertj.core.api.Assertions;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.assertj.core.api.iterable.ThrowingExtractor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -121,7 +138,7 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
 
           sb.http(0);
           sb.https(0);
-          sb.tls(certificate.certificateFile(), certificate.privateKeyFile());
+          sb.tls(TlsKeyPair.of(certificate.privateKey(), certificate.certificate()));
           sb.tlsCustomizer(ssl -> ssl.trustManager(clientCertificate.certificate()));
           sb.decorator(LoggingService.newDecorator());
         }
@@ -160,10 +177,7 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
     }
   }
 
-  @RegisterExtension
-  LogCapturer logs =
-      LogCapturer.create()
-          .captureForType(usingOkHttp() ? OkHttpGrpcExporter.class : UpstreamGrpcExporter.class);
+  @RegisterExtension LogCapturer logs = LogCapturer.create().captureForType(GrpcExporter.class);
 
   private final String type;
   private final U resourceTelemetryInstance;
@@ -177,7 +191,17 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
 
   @BeforeAll
   void setUp() {
-    exporter = exporterBuilder().setEndpoint(server.httpUri().toString()).build();
+    exporter =
+        exporterBuilder()
+            .setEndpoint(server.httpUri().toString())
+            // We don't validate backoff time itself in these tests, just that retries
+            // occur. Keep the tests fast by using minimal backoff.
+            .setRetryPolicy(
+                RetryPolicy.getDefault().toBuilder()
+                    .setMaxAttempts(2)
+                    .setInitialBackoff(Duration.ofMillis(1))
+                    .build())
+            .build();
 
     // Sanity check that TLS files are in PEM format.
     assertThat(certificate.certificateFile())
@@ -212,6 +236,23 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
+  void minimalChannel() {
+    // Test that UpstreamGrpcSender uses minimal fallback managed channel, so skip for
+    // OkHttpGrpcSender
+    assumeThat(exporter.unwrap())
+        .extracting("delegate.grpcSender")
+        .matches(sender -> sender.getClass().getSimpleName().equals("UpstreamGrpcSender"));
+    // When no channel is explicitly set, should fall back to a minimally configured managed channel
+    TelemetryExporter<?> exporter = exporterBuilder().build();
+    assertThat(exporter.shutdown().join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+    assertThat(exporter.unwrap())
+        .extracting(
+            "delegate.grpcSender.stub",
+            as(InstanceOfAssertFactories.type(MarshalerServiceStub.class)))
+        .satisfies(stub -> assertThat(((ManagedChannel) stub.getChannel()).isShutdown()).isTrue());
+  }
+
+  @Test
   void export() {
     List<T> telemetry = Collections.singletonList(generateFakeTelemetry());
     assertThat(exporter.export(telemetry).join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
@@ -243,11 +284,11 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri().toString()).setCompression("none").build();
     try {
-      // UpstreamGrpcExporter doesn't support compression, so we skip the assertion
+      // UpstreamGrpcSender doesn't support compression, so we skip the assertion
       assumeThat(exporter.unwrap())
-          .extracting("delegate")
-          .isNotInstanceOf(UpstreamGrpcExporter.class);
-      assertThat(exporter.unwrap()).extracting("delegate.compressionEnabled").isEqualTo(false);
+          .extracting("delegate.grpcSender")
+          .matches(sender -> sender.getClass().getSimpleName().equals("OkHttpGrpcSender"));
+      assertThat(exporter.unwrap()).extracting("delegate.grpcSender.compressor").isNull();
     } finally {
       exporter.shutdown();
     }
@@ -258,11 +299,30 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri().toString()).setCompression("gzip").build();
     try {
-      // UpstreamGrpcExporter doesn't support compression, so we skip the assertion
+      // UpstreamGrpcSender doesn't support compression, so we skip the assertion
       assumeThat(exporter.unwrap())
-          .extracting("delegate")
-          .isNotInstanceOf(UpstreamGrpcExporter.class);
-      assertThat(exporter.unwrap()).extracting("delegate.compressionEnabled").isEqualTo(true);
+          .extracting("delegate.grpcSender")
+          .matches(sender -> sender.getClass().getSimpleName().equals("OkHttpGrpcSender"));
+      assertThat(exporter.unwrap())
+          .extracting("delegate.grpcSender.compressor")
+          .isEqualTo(GzipCompressor.getInstance());
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  void compressionWithSpiCompressor() {
+    TelemetryExporter<T> exporter =
+        exporterBuilder().setEndpoint(server.httpUri().toString()).setCompression("base64").build();
+    try {
+      // UpstreamGrpcSender doesn't support compression, so we skip the assertion
+      assumeThat(exporter.unwrap())
+          .extracting("delegate.grpcSender")
+          .matches(sender -> sender.getClass().getSimpleName().equals("OkHttpGrpcSender"));
+      assertThat(exporter.unwrap())
+          .extracting("delegate.grpcSender.compressor")
+          .isEqualTo(Base64Compressor.getInstance());
     } finally {
       exporter.shutdown();
     }
@@ -283,18 +343,31 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
 
   @Test
   void withHeaders() {
+    AtomicInteger count = new AtomicInteger();
     TelemetryExporter<T> exporter =
         exporterBuilder()
             .setEndpoint(server.httpUri().toString())
-            .addHeader("key", "value")
+            .addHeader("key1", "value1")
+            .setHeaders(() -> Collections.singletonMap("key2", "value" + count.incrementAndGet()))
             .build();
     try {
+      // Export twice to ensure header supplier gets invoked twice
       CompletableResultCode result =
           exporter.export(Collections.singletonList(generateFakeTelemetry()));
       assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+      result = exporter.export(Collections.singletonList(generateFakeTelemetry()));
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+
       assertThat(httpRequests)
-          .singleElement()
-          .satisfies(req -> assertThat(req.headers().get("key")).isEqualTo("value"));
+          .satisfiesExactly(
+              req -> {
+                assertThat(req.headers().get("key1")).isEqualTo("value1");
+                assertThat(req.headers().get("key2")).isEqualTo("value" + (count.get() - 1));
+              },
+              req -> {
+                assertThat(req.headers().get("key1")).isEqualTo("value1");
+                assertThat(req.headers().get("key2")).isEqualTo("value" + count.get());
+              });
     } finally {
       exporter.shutdown();
     }
@@ -304,8 +377,10 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   void tls() throws Exception {
     TelemetryExporter<T> exporter =
         exporterBuilder()
-            .setEndpoint(server.httpsUri().toString())
             .setTrustedCertificates(Files.readAllBytes(certificate.certificateFile().toPath()))
+            .setClientTls(
+                certificate.privateKey().getEncoded(), certificate.certificate().getEncoded())
+            .setEndpoint(server.httpsUri().toString())
             .build();
     try {
       CompletableResultCode result =
@@ -317,8 +392,32 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
+  void tlsViaSslContext() throws Exception {
+    X509TrustManager trustManager = TlsUtil.trustManager(certificate.certificate().getEncoded());
+
+    X509KeyManager keyManager =
+        TlsUtil.keyManager(
+            certificate.privateKey().getEncoded(), certificate.certificate().getEncoded());
+
+    SSLContext sslContext = SSLContext.getInstance("TLS");
+    sslContext.init(new KeyManager[] {keyManager}, new TrustManager[] {trustManager}, null);
+
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            .setSslContext(sslContext, trustManager)
+            .setEndpoint(server.httpsUri().toString())
+            .build();
+    try {
+      CompletableResultCode result =
+          exporter.export(Collections.singletonList(generateFakeTelemetry()));
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  @SuppressLogger(GrpcExporter.class)
   void tls_untrusted() {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpsUri().toString()).build();
@@ -337,10 +436,9 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
             () ->
                 exporterBuilder()
                     .setEndpoint(server.httpsUri().toString())
-                    .setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8))
-                    .build())
+                    .setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8)))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("Could not set trusted certificates");
+        .hasMessageContaining("Error creating X509TrustManager with provided certs.");
   }
 
   @ParameterizedTest
@@ -373,6 +471,46 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
+  @SuppressLogger(GrpcExporter.class)
+  void connectTimeout() {
+    // UpstreamGrpcSender doesn't support connectTimeout, so we skip the test
+    assumeThat(exporter.unwrap())
+        .extracting("delegate.grpcSender")
+        .matches(sender -> sender.getClass().getSimpleName().equals("OkHttpGrpcSender"));
+
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            // Connecting to a non-routable IP address to trigger connection error
+            .setEndpoint("http://10.255.255.1")
+            .setConnectTimeout(Duration.ofMillis(1))
+            .setRetryPolicy(null)
+            .build();
+    try {
+      long startTimeMillis = System.currentTimeMillis();
+      CompletableResultCode result =
+          exporter.export(Collections.singletonList(generateFakeTelemetry()));
+
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isFalse();
+
+      assertThat(result.getFailureThrowable())
+          .asInstanceOf(
+              InstanceOfAssertFactories.throwable(FailedExportException.GrpcExportException.class))
+          .returns(false, Assertions.from(FailedExportException::failedWithResponse))
+          .satisfies(
+              ex -> {
+                assertThat(ex.getResponse()).isNull();
+                assertThat(ex.getCause()).isNotNull();
+              });
+
+      // Assert that the export request fails well before the default connect timeout of 10s
+      assertThat(System.currentTimeMillis() - startTimeMillis)
+          .isLessThan(TimeUnit.SECONDS.toMillis(1));
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
   void deadlineSetPerExport() throws InterruptedException {
     TelemetryExporter<T> exporter =
         exporterBuilder()
@@ -390,8 +528,7 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
+  @SuppressLogger(GrpcExporter.class)
   void exportAfterShutdown() {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri().toString()).build();
@@ -406,8 +543,7 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
+  @SuppressLogger(GrpcExporter.class)
   void doubleShutdown() {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri().toString()).build();
@@ -418,153 +554,79 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
+  @SuppressLogger(GrpcExporter.class)
   void error() {
-    addGrpcError(13, null);
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
-    LoggingEvent log =
-        logs.assertContains(
-            "Failed to export "
-                + type
-                + "s. Server responded with gRPC status code 13. Error message:");
-    assertThat(log.getLevel()).isEqualTo(Level.WARN);
-  }
+    int statusCode = 13;
+    addGrpcError(statusCode, null);
 
-  @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void errorWithMessage() {
-    addGrpcError(8, "out of quota");
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
-    LoggingEvent log =
-        logs.assertContains(
-            "Failed to export "
-                + type
-                + "s. Server responded with gRPC status code 8. Error message: out of quota");
-    assertThat(log.getLevel()).isEqualTo(Level.WARN);
-  }
+    TelemetryExporter<T> exporter = nonRetryingExporter();
 
-  @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void errorWithEscapedMessage() {
-    addGrpcError(5, "クマ🐻");
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
-    LoggingEvent log =
-        logs.assertContains(
-            "Failed to export "
-                + type
-                + "s. Server responded with gRPC status code 5. Error message: クマ🐻");
-    assertThat(log.getLevel()).isEqualTo(Level.WARN);
-  }
+    try {
+      CompletableResultCode result =
+          exporter
+              .export(Collections.singletonList(generateFakeTelemetry()))
+              .join(10, TimeUnit.SECONDS);
 
-  @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void testExport_Unavailable() {
-    addGrpcError(14, null);
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
-    LoggingEvent log =
-        logs.assertContains(
-            "Failed to export "
-                + type
-                + "s. Server is UNAVAILABLE. "
-                + "Make sure your collector is running and reachable from this network.");
-    assertThat(log.getLevel()).isEqualTo(Level.ERROR);
-  }
+      assertThat(result.isSuccess()).isFalse();
 
-  @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void testExport_Unimplemented() {
-    addGrpcError(12, "UNIMPLEMENTED");
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
-    String envVar;
-    switch (type) {
-      case "span":
-        envVar = "OTEL_TRACES_EXPORTER";
-        break;
-      case "metric":
-        envVar = "OTEL_METRICS_EXPORTER";
-        break;
-      case "log":
-        envVar = "OTEL_LOGS_EXPORTER";
-        break;
-      default:
-        throw new AssertionError();
+      assertThat(result.getFailureThrowable())
+          .asInstanceOf(
+              InstanceOfAssertFactories.throwable(FailedExportException.GrpcExportException.class))
+          .returns(true, Assertions.from(FailedExportException::failedWithResponse))
+          .satisfies(
+              ex -> {
+                assertThat(ex.getResponse())
+                    .isNotNull()
+                    .extracting(GrpcResponse::grpcStatusValue)
+                    .isEqualTo(statusCode);
+
+                assertThat(ex.getCause()).isNull();
+              });
+
+      LoggingEvent log =
+          logs.assertContains(
+              "Failed to export "
+                  + type
+                  + "s. Server responded with gRPC status code 13. Error message:");
+      assertThat(log.getLevel()).isEqualTo(Level.WARN);
+    } finally {
+      exporter.shutdown();
     }
-    LoggingEvent log =
-        logs.assertContains(
-            "Failed to export "
-                + type
-                + "s. Server responded with UNIMPLEMENTED. "
-                + "This usually means that your collector is not configured with an otlp "
-                + "receiver in the \"pipelines\" section of the configuration. "
-                + "If export is not desired and you are using OpenTelemetry autoconfiguration or the javaagent, "
-                + "disable export by setting "
-                + envVar
-                + "=none. "
-                + "Full error message: UNIMPLEMENTED");
-    assertThat(log.getLevel()).isEqualTo(Level.ERROR);
   }
 
-  @ParameterizedTest
-  @ValueSource(ints = {1, 4, 8, 10, 11, 14, 15})
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void retryableError(int code) {
-    addGrpcError(code, null);
+  @Test
+  @SuppressLogger(GrpcExporter.class)
+  void errorWithUnknownError() {
+    addGrpcError(2, null);
 
-    TelemetryExporter<T> exporter = retryingExporter();
+    TelemetryExporter<T> exporter = nonRetryingExporter();
 
     try {
       assertThat(
               exporter
                   .export(Collections.singletonList(generateFakeTelemetry()))
                   .join(10, TimeUnit.SECONDS)
-                  .isSuccess())
-          .isTrue();
+                  .getFailureThrowable())
+          .asInstanceOf(
+              InstanceOfAssertFactories.throwable(FailedExportException.GrpcExportException.class))
+          .returns(true, Assertions.from(FailedExportException::failedWithResponse))
+          .satisfies(
+              ex -> {
+                assertThat(ex.getResponse()).isNotNull();
+
+                assertThat(ex.getCause()).isNull();
+              });
     } finally {
       exporter.shutdown();
     }
-
-    assertThat(attempts).hasValue(2);
   }
 
   @Test
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
-  void retryableError_tooManyAttempts() {
-    addGrpcError(1, null);
-    addGrpcError(1, null);
+  @SuppressLogger(GrpcExporter.class)
+  void errorWithMessage() {
+    addGrpcError(8, "out of quota");
 
-    TelemetryExporter<T> exporter = retryingExporter();
+    TelemetryExporter<T> exporter = nonRetryingExporter();
 
     try {
       assertThat(
@@ -573,32 +635,158 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
                   .join(10, TimeUnit.SECONDS)
                   .isSuccess())
           .isFalse();
+      LoggingEvent log =
+          logs.assertContains(
+              "Failed to export "
+                  + type
+                  + "s. Server responded with gRPC status code 8. Error message: out of quota");
+      assertThat(log.getLevel()).isEqualTo(Level.WARN);
     } finally {
       exporter.shutdown();
     }
+  }
+
+  @Test
+  @SuppressLogger(GrpcExporter.class)
+  void errorWithEscapedMessage() {
+    addGrpcError(5, "クマ🐻");
+
+    TelemetryExporter<T> exporter = nonRetryingExporter();
+
+    try {
+      assertThat(
+              exporter
+                  .export(Collections.singletonList(generateFakeTelemetry()))
+                  .join(10, TimeUnit.SECONDS)
+                  .isSuccess())
+          .isFalse();
+      LoggingEvent log =
+          logs.assertContains(
+              "Failed to export "
+                  + type
+                  + "s. Server responded with gRPC status code 5. Error message: クマ🐻");
+      assertThat(log.getLevel()).isEqualTo(Level.WARN);
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  @SuppressLogger(GrpcExporter.class)
+  void testExport_Unavailable() {
+    addGrpcError(14, null);
+
+    TelemetryExporter<T> exporter = nonRetryingExporter();
+
+    try {
+      assertThat(
+              exporter
+                  .export(Collections.singletonList(generateFakeTelemetry()))
+                  .join(10, TimeUnit.SECONDS)
+                  .isSuccess())
+          .isFalse();
+      LoggingEvent log =
+          logs.assertContains(
+              "Failed to export "
+                  + type
+                  + "s. Server is UNAVAILABLE. "
+                  + "Make sure your collector is running and reachable from this network.");
+      assertThat(log.getLevel()).isEqualTo(Level.ERROR);
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  @SuppressLogger(GrpcExporter.class)
+  void testExport_Unimplemented() {
+    addGrpcError(12, "UNIMPLEMENTED");
+
+    TelemetryExporter<T> exporter = nonRetryingExporter();
+
+    try {
+      assertThat(
+              exporter
+                  .export(Collections.singletonList(generateFakeTelemetry()))
+                  .join(10, TimeUnit.SECONDS)
+                  .isSuccess())
+          .isFalse();
+      String envVar;
+      switch (type) {
+        case "span":
+          envVar = "OTEL_TRACES_EXPORTER";
+          break;
+        case "metric":
+          envVar = "OTEL_METRICS_EXPORTER";
+          break;
+        case "log":
+          envVar = "OTEL_LOGS_EXPORTER";
+          break;
+        default:
+          throw new AssertionError();
+      }
+      LoggingEvent log =
+          logs.assertContains(
+              "Failed to export "
+                  + type
+                  + "s. Server responded with UNIMPLEMENTED. "
+                  + "This usually means that your collector is not configured with an otlp "
+                  + "receiver in the \"pipelines\" section of the configuration. "
+                  + "If export is not desired and you are using OpenTelemetry autoconfiguration or the javaagent, "
+                  + "disable export by setting "
+                  + envVar
+                  + "=none. "
+                  + "Full error message: UNIMPLEMENTED");
+      assertThat(log.getLevel()).isEqualTo(Level.ERROR);
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 4, 8, 10, 11, 14, 15})
+  @SuppressLogger(GrpcExporter.class)
+  void retryableError(int code) {
+    addGrpcError(code, null);
+
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isTrue();
+
+    assertThat(attempts).hasValue(2);
+  }
+
+  @Test
+  @SuppressLogger(GrpcExporter.class)
+  void retryableError_tooManyAttempts() {
+    addGrpcError(1, null);
+    addGrpcError(1, null);
+
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isFalse();
 
     assertThat(attempts).hasValue(2);
   }
 
   @ParameterizedTest
   @ValueSource(ints = {2, 3, 5, 6, 7, 9, 12, 13, 16})
-  @SuppressLogger(OkHttpGrpcExporter.class)
-  @SuppressLogger(UpstreamGrpcExporter.class)
+  @SuppressLogger(GrpcExporter.class)
   void nonRetryableError(int code) {
     addGrpcError(code, null);
 
-    TelemetryExporter<T> exporter = retryingExporter();
-
-    try {
-      assertThat(
-              exporter
-                  .export(Collections.singletonList(generateFakeTelemetry()))
-                  .join(10, TimeUnit.SECONDS)
-                  .isSuccess())
-          .isFalse();
-    } finally {
-      exporter.shutdown();
-    }
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isFalse();
 
     assertThat(attempts).hasValue(1);
   }
@@ -627,13 +815,39 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
   @Test
   @SuppressWarnings("PreferJavaTimeOverload")
   void validConfig() {
-    assertThatCode(() -> exporterBuilder().setTimeout(0, TimeUnit.MILLISECONDS))
+    // We must build exporters to test timeout settings, which intersect with underlying client
+    // implementations and may convert between Duration, int, and long, which may be susceptible to
+    // overflow exceptions.
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(0, TimeUnit.MILLISECONDS)))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(Duration.ofMillis(0)))
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofMillis(0))))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(10, TimeUnit.MILLISECONDS))
+    assertThatCode(
+            () ->
+                buildAndShutdown(
+                    exporterBuilder().setTimeout(Long.MAX_VALUE, TimeUnit.NANOSECONDS)))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(Duration.ofMillis(10)))
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofNanos(Long.MAX_VALUE))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setTimeout(Long.MAX_VALUE, TimeUnit.SECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(10, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofMillis(10))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(0, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(Duration.ofMillis(0))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(10, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(Duration.ofMillis(10))))
         .doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().setEndpoint("http://localhost:4317"))
@@ -646,15 +860,21 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
         .doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().setCompression("gzip")).doesNotThrowAnyException();
+    // SPI compressor available for this test but not packaged with OTLP exporter
+    assertThatCode(() -> exporterBuilder().setCompression("base64")).doesNotThrowAnyException();
     assertThatCode(() -> exporterBuilder().setCompression("none")).doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().addHeader("foo", "bar").addHeader("baz", "qux"))
         .doesNotThrowAnyException();
 
     assertThatCode(
-            () ->
-                exporterBuilder().setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8)))
+            () -> exporterBuilder().setTrustedCertificates(certificate.certificate().getEncoded()))
         .doesNotThrowAnyException();
+  }
+
+  private void buildAndShutdown(TelemetryExporterBuilder<T> builder) {
+    TelemetryExporter<T> build = builder.build();
+    build.shutdown().join(10, TimeUnit.MILLISECONDS);
   }
 
   @Test
@@ -669,6 +889,25 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
     assertThatThrownBy(() -> exporterBuilder().setTimeout(null))
         .isInstanceOf(NullPointerException.class)
         .hasMessage("timeout");
+    assertThatThrownBy(
+            () ->
+                buildAndShutdown(exporterBuilder().setTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+        .isInstanceOf(ArithmeticException.class);
+
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(-1, TimeUnit.MILLISECONDS))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("timeout must be non-negative");
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(1, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("unit");
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("timeout");
+    assertThatThrownBy(
+            () ->
+                buildAndShutdown(
+                    exporterBuilder().setConnectTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+        .isInstanceOf(ArithmeticException.class);
 
     assertThatThrownBy(() -> exporterBuilder().setEndpoint(null))
         .isInstanceOf(NullPointerException.class)
@@ -689,10 +928,139 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
     assertThatThrownBy(() -> exporterBuilder().setCompression("foo"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage(
-            "Unsupported compression method. Supported compression methods include: gzip, none.");
+            "Unsupported compressionMethod. Compression method must be \"none\" or one of: [base64,gzip]");
+  }
+
+  @Test
+  void toBuilderEquality()
+      throws CertificateEncodingException,
+          IOException,
+          NoSuchFieldException,
+          IllegalAccessException {
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            .setTimeout(Duration.ofSeconds(5))
+            .setEndpoint("http://localhost:4317")
+            .setCompression("gzip")
+            .addHeader("foo", "bar")
+            .setTrustedCertificates(certificate.certificate().getEncoded())
+            .setClientTls(
+                Files.readAllBytes(clientCertificate.privateKeyFile().toPath()),
+                Files.readAllBytes(clientCertificate.certificateFile().toPath()))
+            .setRetryPolicy(
+                RetryPolicy.builder()
+                    .setMaxAttempts(2)
+                    .setMaxBackoff(Duration.ofSeconds(3))
+                    .setInitialBackoff(Duration.ofMillis(50))
+                    .setBackoffMultiplier(1.3)
+                    .build())
+            .build();
+
+    Object unwrapped = exporter.unwrap();
+    Field builderField = unwrapped.getClass().getDeclaredField("builder");
+    builderField.setAccessible(true);
+
+    try {
+      // Builder copy should be equal to original when unchanged
+      TelemetryExporter<T> copy = toBuilder(exporter).build();
+      try {
+        assertThat(copy.unwrap())
+            .extracting("builder")
+            .usingRecursiveComparison()
+            .ignoringFields("tlsConfigHelper")
+            .isEqualTo(builderField.get(unwrapped));
+      } finally {
+        copy.shutdown();
+      }
+
+      // Builder copy should NOT be equal when changed
+      copy = toBuilder(exporter).addHeader("baz", "qux").build();
+      try {
+        assertThat(copy.unwrap())
+            .extracting("builder")
+            .usingRecursiveComparison()
+            .ignoringFields("tlsConfigHelper")
+            .isNotEqualTo(builderField.get(unwrapped));
+      } finally {
+        copy.shutdown();
+      }
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  void stringRepresentation() throws IOException, CertificateEncodingException {
+    TelemetryExporter<T> telemetryExporter =
+        exporterBuilder().setEndpoint("http://localhost:4317").build();
+    try {
+      assertThat(telemetryExporter.unwrap().toString())
+          .matches(
+              "OtlpGrpc[a-zA-Z]*Exporter\\{"
+                  + "exporterName=otlp, "
+                  + "type=[a-zA_Z]*, "
+                  + "endpoint=http://localhost:4317, "
+                  + "endpointPath=.*, "
+                  + "timeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(10)
+                  + ", "
+                  + "connectTimeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(10)
+                  + ", "
+                  + "compressorEncoding=null, "
+                  + "headers=Headers\\{User-Agent=OBFUSCATED\\}"
+                  + ".*" // Maybe additional grpcChannel field, signal specific fields
+                  + "\\}");
+    } finally {
+      telemetryExporter.shutdown();
+    }
+
+    telemetryExporter =
+        exporterBuilder()
+            .setTimeout(Duration.ofSeconds(5))
+            .setConnectTimeout(Duration.ofSeconds(4))
+            .setEndpoint("http://example:4317")
+            .setCompression("gzip")
+            .addHeader("foo", "bar")
+            .setTrustedCertificates(certificate.certificate().getEncoded())
+            .setClientTls(
+                Files.readAllBytes(clientCertificate.privateKeyFile().toPath()),
+                Files.readAllBytes(clientCertificate.certificateFile().toPath()))
+            .setRetryPolicy(
+                RetryPolicy.builder()
+                    .setMaxAttempts(2)
+                    .setMaxBackoff(Duration.ofSeconds(3))
+                    .setInitialBackoff(Duration.ofMillis(50))
+                    .setBackoffMultiplier(1.3)
+                    .build())
+            .build();
+    try {
+      assertThat(telemetryExporter.unwrap().toString())
+          .matches(
+              "OtlpGrpc[a-zA-Z]*Exporter\\{"
+                  + "exporterName=otlp, "
+                  + "type=[a-zA_Z]*, "
+                  + "endpoint=http://example:4317, "
+                  + "endpointPath=.*, "
+                  + "timeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(5)
+                  + ", "
+                  + "connectTimeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(4)
+                  + ", "
+                  + "compressorEncoding=gzip, "
+                  + "headers=Headers\\{.*foo=OBFUSCATED.*\\}, "
+                  + "retryPolicy=RetryPolicy\\{maxAttempts=2, initialBackoff=PT0\\.05S, maxBackoff=PT3S, backoffMultiplier=1\\.3, retryExceptionPredicate=null\\}"
+                  + ".*" // Maybe additional grpcChannel field, signal specific fields
+                  + "\\}");
+    } finally {
+      telemetryExporter.shutdown();
+    }
   }
 
   protected abstract TelemetryExporterBuilder<T> exporterBuilder();
+
+  protected abstract TelemetryExporterBuilder<T> toBuilder(TelemetryExporter<T> exporter);
 
   protected abstract T generateFakeTelemetry();
 
@@ -720,31 +1088,11 @@ public abstract class AbstractGrpcTelemetryExporterTest<T, U extends Message> {
         .collect(Collectors.toList());
   }
 
-  private TelemetryExporter<T> retryingExporter() {
-    return exporterBuilder()
-        .setEndpoint(server.httpUri().toString())
-        .setRetryPolicy(
-            RetryPolicy.builder()
-                .setMaxAttempts(2)
-                // We don't validate backoff time itself in these tests, just that retries
-                // occur. Keep the tests fast by using minimal backoff.
-                .setInitialBackoff(Duration.ofMillis(1))
-                .setMaxBackoff(Duration.ofMillis(1))
-                .setBackoffMultiplier(1)
-                .build())
-        .build();
+  private TelemetryExporter<T> nonRetryingExporter() {
+    return exporterBuilder().setEndpoint(server.httpUri().toString()).setRetryPolicy(null).build();
   }
 
   private static void addGrpcError(int code, @Nullable String message) {
     grpcErrors.add(new ArmeriaStatusException(code, message));
-  }
-
-  private static boolean usingOkHttp() {
-    try {
-      Class.forName("io.grpc.internal.AbstractManagedChannelImplBuilder");
-      return false;
-    } catch (ClassNotFoundException e) {
-      return true;
-    }
   }
 }

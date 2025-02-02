@@ -15,26 +15,25 @@ val versions: Map<String, String> by project
 dependencies {
   protoSource("io.opentelemetry.proto:opentelemetry-proto:${versions["io.opentelemetry.proto"]}")
 
-  api(project(":exporters:common"))
+  annotationProcessor("com.google.auto.value:auto-value")
 
-  implementation(project(":sdk-extensions:autoconfigure-spi"))
+  api(project(":exporters:common"))
 
   compileOnly(project(":sdk:metrics"))
   compileOnly(project(":sdk:trace"))
   compileOnly(project(":sdk:logs"))
 
-  implementation("com.squareup.okhttp3:okhttp")
-
   testImplementation(project(":sdk:metrics"))
   testImplementation(project(":sdk:trace"))
   testImplementation(project(":sdk:logs"))
   testImplementation(project(":sdk:testing"))
-  testImplementation(project(":sdk:logs-testing"))
 
   testImplementation("com.fasterxml.jackson.core:jackson-databind")
   testImplementation("com.google.protobuf:protobuf-java-util")
+  testImplementation("com.google.guava:guava")
   testImplementation("io.opentelemetry.proto:opentelemetry-proto")
 
+  jmhImplementation(project(":api:incubator"))
   jmhImplementation(project(":sdk:testing"))
   jmhImplementation("com.fasterxml.jackson.core:jackson-core")
   jmhImplementation("io.opentelemetry.proto:opentelemetry-proto")
@@ -46,18 +45,10 @@ wire {
     "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
     "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
     "opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest",
+    "opentelemetry.proto.collector.profiles.v1development.ExportProfilesServiceRequest"
   )
 
   custom {
     schemaHandlerFactoryClass = "io.opentelemetry.gradle.ProtoFieldsWireHandlerFactory"
-  }
-}
-
-// Declare sourcesJar dependency on proto generation so gradle doesn't complain about implicit dependency
-tasks.getByName("sourcesJar").dependsOn("generateMainProtos")
-
-sourceSets {
-  main {
-    java.srcDir("$buildDir/generated/source/wire")
   }
 }

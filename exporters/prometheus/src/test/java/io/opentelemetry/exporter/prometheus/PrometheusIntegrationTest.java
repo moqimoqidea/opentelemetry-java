@@ -11,7 +11,7 @@ import static org.testcontainers.Testcontainers.exposeHostPorts;
 
 import com.fasterxml.jackson.core.TreeNode;
 import com.fasterxml.jackson.jr.ob.JSON;
-import com.fasterxml.jackson.jr.stree.JacksonJrsTreeCodec;
+import com.fasterxml.jackson.jr.stree.JrSimpleTreeExtension;
 import com.fasterxml.jackson.jr.stree.JrsString;
 import com.google.common.io.Resources;
 import com.linecorp.armeria.client.WebClient;
@@ -35,7 +35,10 @@ import org.testcontainers.utility.MountableFile;
 @Testcontainers(disabledWithoutDocker = true)
 class PrometheusIntegrationTest {
 
+  @SuppressWarnings("NonFinalStaticField")
   private static SdkMeterProvider meterProvider;
+
+  @SuppressWarnings("NonFinalStaticField")
   private static GenericContainer<?> prometheus;
 
   @BeforeAll
@@ -85,7 +88,7 @@ class PrometheusIntegrationTest {
             result -> result.record(9, Attributes.builder().put("animal", "cat").build()));
 
     WebClient promClient = WebClient.of("http://localhost:" + prometheus.getMappedPort(9090));
-    JSON json = JSON.builder().treeCodec(new JacksonJrsTreeCodec()).build();
+    JSON json = JSON.builder().register(new JrSimpleTreeExtension()).build();
     await()
         .untilAsserted(
             () -> {

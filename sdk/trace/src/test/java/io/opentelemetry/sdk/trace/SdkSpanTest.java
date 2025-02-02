@@ -15,7 +15,14 @@ import static io.opentelemetry.api.common.AttributeKey.stringArrayKey;
 import static io.opentelemetry.api.common.AttributeKey.stringKey;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -34,15 +41,16 @@ import io.opentelemetry.sdk.internal.InstrumentationScopeUtil;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.testing.time.TestClock;
 import io.opentelemetry.sdk.trace.data.EventData;
+import io.opentelemetry.sdk.trace.data.ExceptionEventData;
 import io.opentelemetry.sdk.trace.data.LinkData;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.data.StatusData;
-import io.opentelemetry.sdk.trace.internal.data.ExceptionEventData;
-import io.opentelemetry.semconv.trace.attributes.SemanticAttributes;
+import io.opentelemetry.sdk.trace.internal.ExtendedSpanProcessor;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -53,17 +61,27 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class SdkSpanTest {
   private static final String SPAN_NAME = "MySpanName";
   private static final String SPAN_NEW_NAME = "NewName";
@@ -82,7 +100,7 @@ class SdkSpanTest {
   private final Map<AttributeKey, Object> attributes = new HashMap<>();
   private Attributes expectedAttributes;
   private final LinkData link = LinkData.create(spanContext);
-  @Mock private SpanProcessor spanProcessor;
+  @Mock private ExtendedSpanProcessor spanProcessor;
 
   private TestClock testClock;
 
@@ -98,6 +116,9 @@ class SdkSpanTest {
     }
     expectedAttributes = builder.build();
     testClock = TestClock.create(Instant.ofEpochSecond(0, START_EPOCH_NANOS));
+    when(spanProcessor.isStartRequired()).thenReturn(true);
+    when(spanProcessor.isOnEndingRequired()).thenReturn(true);
+    when(spanProcessor.isEndRequired()).thenReturn(true);
   }
 
   @Test
@@ -117,7 +138,7 @@ class SdkSpanTest {
         START_EPOCH_NANOS,
         START_EPOCH_NANOS,
         StatusData.unset(),
-        /*hasEnded=*/ true);
+        /* hasEnded= */ true);
   }
 
   @Test
@@ -128,6 +149,92 @@ class SdkSpanTest {
     assertThat(span.hasEnded()).isTrue();
     span.end();
     assertThat(span.hasEnded()).isTrue();
+  }
+
+  @Test
+  void onEnding_spanStillMutable() {
+    SdkSpan span = createTestSpan(SpanKind.INTERNAL);
+
+    AttributeKey<String> dummyAttrib = AttributeKey.stringKey("processor_foo");
+
+    AtomicBoolean endedStateInProcessor = new AtomicBoolean();
+    doAnswer(
+            invocation -> {
+              ReadWriteSpan sp = invocation.getArgument(0, ReadWriteSpan.class);
+              assertThat(sp.hasEnded()).isFalse();
+              sp.end(); // should have no effect, nested end should be detected
+              endedStateInProcessor.set(sp.hasEnded());
+              sp.setAttribute(dummyAttrib, "bar");
+              return null;
+            })
+        .when(spanProcessor)
+        .onEnding(any());
+
+    span.end();
+    verify(spanProcessor).onEnding(same(span));
+    assertThat(span.hasEnded()).isTrue();
+    assertThat(endedStateInProcessor.get()).isFalse();
+    assertThat(span.getAttribute(dummyAttrib)).isEqualTo("bar");
+  }
+
+  @Test
+  void onEnding_concurrentModificationsPrevented() {
+    SdkSpan span = createTestSpan(SpanKind.INTERNAL);
+
+    AttributeKey<String> syncAttrib = AttributeKey.stringKey("sync_foo");
+    AttributeKey<String> concurrentAttrib = AttributeKey.stringKey("concurrent_foo");
+
+    doAnswer(
+            invocation -> {
+              ReadWriteSpan sp = invocation.getArgument(0, ReadWriteSpan.class);
+
+              Thread concurrent =
+                  new Thread(
+                      () -> {
+                        sp.setAttribute(concurrentAttrib, "concurrent_bar");
+                      });
+              concurrent.start();
+              concurrent.join();
+
+              sp.setAttribute(syncAttrib, "sync_bar");
+
+              return null;
+            })
+        .when(spanProcessor)
+        .onEnding(any());
+
+    span.end();
+    verify(spanProcessor).onEnding(same(span));
+    assertThat(span.getAttribute(concurrentAttrib)).isNull();
+    assertThat(span.getAttribute(syncAttrib)).isEqualTo("sync_bar");
+  }
+
+  @Test
+  void onEnding_latencyPinned() {
+    SdkSpan span = createTestSpan(SpanKind.INTERNAL);
+
+    AtomicLong spanLatencyInProcessor = new AtomicLong();
+    doAnswer(
+            invocation -> {
+              ReadWriteSpan sp = invocation.getArgument(0, ReadWriteSpan.class);
+
+              testClock.advance(Duration.ofSeconds(100));
+              spanLatencyInProcessor.set(sp.getLatencyNanos());
+              return null;
+            })
+        .when(spanProcessor)
+        .onEnding(any());
+
+    testClock.advance(Duration.ofSeconds(1));
+    long expectedDuration = testClock.now() - START_EPOCH_NANOS;
+
+    assertThat(span.getLatencyNanos()).isEqualTo(expectedDuration);
+
+    span.end();
+    verify(spanProcessor).onEnding(same(span));
+    assertThat(span.hasEnded()).isTrue();
+    assertThat(span.getLatencyNanos()).isEqualTo(expectedDuration);
+    assertThat(spanLatencyInProcessor.get()).isEqualTo(expectedDuration);
   }
 
   @Test
@@ -148,7 +255,7 @@ class SdkSpanTest {
           START_EPOCH_NANOS,
           0,
           StatusData.unset(),
-          /*hasEnded=*/ false);
+          /* hasEnded= */ false);
       assertThat(span.hasEnded()).isFalse();
       assertThat(span.isRecording()).isTrue();
     } finally {
@@ -179,7 +286,7 @@ class SdkSpanTest {
         START_EPOCH_NANOS,
         testClock.now(),
         StatusData.create(StatusCode.ERROR, "CANCELLED"),
-        /*hasEnded=*/ true);
+        /* hasEnded= */ true);
   }
 
   @Test
@@ -325,6 +432,32 @@ class SdkSpanTest {
     SdkSpan span = createTestSpanWithAttributes(attributes);
     try {
       assertThat(span.getAttribute(longKey("MyLongAttributeKey"))).isEqualTo(123L);
+    } finally {
+      span.end();
+    }
+  }
+
+  @Test
+  void getAttributes() {
+    SdkSpan span = createTestSpanWithAttributes(attributes);
+    try {
+      assertThat(span.getAttributes())
+          .isEqualTo(
+              Attributes.builder()
+                  .put("MyBooleanAttributeKey", false)
+                  .put("MyStringAttributeKey", "MyStringAttributeValue")
+                  .put("MyLongAttributeKey", 123L)
+                  .build());
+    } finally {
+      span.end();
+    }
+  }
+
+  @Test
+  void getAttributes_Empty() {
+    SdkSpan span = createTestSpan(SpanKind.INTERNAL);
+    try {
+      assertThat(span.getAttributes()).isEqualTo(Attributes.empty());
     } finally {
       span.end();
     }
@@ -745,11 +878,12 @@ class SdkSpanTest {
       assertThat(events).hasSize(1);
       EventData event = events.get(0);
       assertThat(event.getName()).isEqualTo("exception");
-      assertThat(event.getAttributes().get(SemanticAttributes.EXCEPTION_TYPE))
+      assertThat(event.getAttributes().get(stringKey("exception.type")))
           .isEqualTo("java.lang.IllegalStateException".substring(0, maxLength));
-      assertThat(event.getAttributes().get(SemanticAttributes.EXCEPTION_MESSAGE)).isEqualTo(strVal);
-      assertThat(event.getAttributes().get(SemanticAttributes.EXCEPTION_STACKTRACE).length())
+      assertThat(event.getAttributes().get(stringKey("exception.message"))).isEqualTo(strVal);
+      assertThat(event.getAttributes().get(stringKey("exception.stacktrace")).length())
           .isLessThanOrEqualTo(maxLength);
+      assertThat(event.getAttributes().size()).isEqualTo(3);
     } finally {
       span.end();
     }
@@ -791,6 +925,129 @@ class SdkSpanTest {
     } finally {
       span.end();
     }
+  }
+
+  @Test
+  void addLink() {
+    int maxLinks = 3;
+    int maxNumberOfAttributes = 4;
+    int maxAttributeLength = 5;
+    SdkSpan span =
+        createTestSpan(
+            SpanKind.INTERNAL,
+            SpanLimits.builder()
+                .setMaxNumberOfLinks(maxLinks)
+                .setMaxNumberOfAttributesPerLink(maxNumberOfAttributes)
+                .setMaxAttributeValueLength(maxAttributeLength)
+                .build(),
+            parentSpanId,
+            null,
+            null);
+    try {
+      Span span1 = createTestSpan(SpanKind.INTERNAL);
+      Span span2 = createTestSpan(SpanKind.INTERNAL);
+      Span span3 = createTestSpan(SpanKind.INTERNAL);
+      Span span4 = createTestSpan(SpanKind.INTERNAL);
+
+      span.addLink(span1.getSpanContext());
+
+      Attributes span2LinkAttributes =
+          Attributes.builder()
+              .put("key1", true)
+              .put("key2", true)
+              .put("key3", true)
+              .put(
+                  "key4",
+                  IntStream.range(0, maxAttributeLength + 1).mapToObj(i -> "a").collect(joining()))
+              .build();
+      span.addLink(span2.getSpanContext(), span2LinkAttributes);
+
+      Attributes span3LinkAttributes =
+          Attributes.builder()
+              .put("key1", true)
+              .put("key2", true)
+              .put("key3", true)
+              .put("key4", true)
+              .put("key5", true)
+              .build();
+      span.addLink(span3.getSpanContext(), span3LinkAttributes);
+
+      span.addLink(span4.getSpanContext());
+
+      SpanData spanData = span.toSpanData();
+      // 1 link added during span construction via createTestSpan, 4 links added after span start
+      assertThat(spanData.getTotalRecordedLinks()).isEqualTo(4);
+      assertThat(spanData.getLinks())
+          .satisfiesExactly(
+              link -> {
+                assertThat(link.getSpanContext()).isEqualTo(span1.getSpanContext());
+                assertThat(link.getAttributes()).isEqualTo(Attributes.empty());
+              },
+              link -> {
+                assertThat(link.getSpanContext()).isEqualTo(span2.getSpanContext());
+                assertThat(link.getAttributes())
+                    .isEqualTo(
+                        Attributes.builder()
+                            .put("key1", true)
+                            .put("key2", true)
+                            .put("key3", true)
+                            // Should be truncated to max attribute length
+                            .put(
+                                "key4",
+                                IntStream.range(0, maxAttributeLength)
+                                    .mapToObj(i -> "a")
+                                    .collect(joining()))
+                            .build());
+              },
+              link -> {
+                assertThat(link.getSpanContext()).isEqualTo(span2.getSpanContext());
+                // The 5th attribute key should be omitted due to attribute limits. Can't predict
+                // which of the 5 is dropped.
+                assertThat(link.getAttributes().size()).isEqualTo(4);
+              });
+    } finally {
+      span.end();
+    }
+  }
+
+  @Test
+  void addLink_InvalidArgs() {
+    SdkSpan span = createTestSpan(SpanKind.INTERNAL);
+    assertThatCode(() -> span.addLink(null)).doesNotThrowAnyException();
+    assertThatCode(() -> span.addLink(SpanContext.getInvalid())).doesNotThrowAnyException();
+    assertThatCode(() -> span.addLink(null, null)).doesNotThrowAnyException();
+    assertThatCode(() -> span.addLink(SpanContext.getInvalid(), Attributes.empty()))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void addLink_FaultIn() {
+    SdkSpan span =
+        SdkSpan.startSpan(
+            spanContext,
+            SPAN_NAME,
+            instrumentationScopeInfo,
+            SpanKind.INTERNAL,
+            Span.getInvalid(),
+            Context.root(),
+            SpanLimits.getDefault(),
+            spanProcessor,
+            testClock,
+            resource,
+            null,
+            null, // exercises the fault-in path
+            0,
+            0);
+    SdkSpan linkedSpan = createTestSpan(SpanKind.INTERNAL);
+    span.addLink(linkedSpan.getSpanContext());
+
+    SpanData spanData = span.toSpanData();
+    assertThat(spanData.getTotalRecordedLinks()).isEqualTo(1);
+    assertThat(spanData.getLinks())
+        .satisfiesExactly(
+            link -> {
+              assertThat(link.getSpanContext()).isEqualTo(linkedSpan.getSpanContext());
+            });
   }
 
   @Test
@@ -908,6 +1165,9 @@ class SdkSpanTest {
     testClock.advance(Duration.ofNanos(1000));
     long timestamp = testClock.now();
 
+    // make sure that span attributes don't leak down to the exception event
+    span.setAttribute("spankey", "val");
+
     span.recordException(exception);
 
     List<EventData> events = span.toSpanData().getEvents();
@@ -915,20 +1175,17 @@ class SdkSpanTest {
     EventData event = events.get(0);
     assertThat(event.getName()).isEqualTo("exception");
     assertThat(event.getEpochNanos()).isEqualTo(timestamp);
-    assertThat(event.getAttributes())
-        .isEqualTo(
-            Attributes.builder()
-                .put(SemanticAttributes.EXCEPTION_TYPE, "java.lang.IllegalStateException")
-                .put(SemanticAttributes.EXCEPTION_MESSAGE, "there was an exception")
-                .put(SemanticAttributes.EXCEPTION_STACKTRACE, stacktrace)
-                .build());
-
+    assertThat(event.getAttributes().get(stringKey("exception.message")))
+        .isEqualTo("there was an exception");
+    assertThat(event.getAttributes().get(stringKey("exception.type")))
+        .isEqualTo(exception.getClass().getName());
+    assertThat(event.getAttributes().get(stringKey("exception.stacktrace"))).isEqualTo(stacktrace);
+    assertThat(event.getAttributes().size()).isEqualTo(3);
     assertThat(event)
         .isInstanceOfSatisfying(
             ExceptionEventData.class,
             exceptionEvent -> {
               assertThat(exceptionEvent.getException()).isSameAs(exception);
-              assertThat(exceptionEvent.getAdditionalAttributes()).isEqualTo(Attributes.empty());
             });
   }
 
@@ -937,12 +1194,20 @@ class SdkSpanTest {
     IllegalStateException exception = new IllegalStateException();
     SdkSpan span = createTestRootSpan();
 
+    StringWriter writer = new StringWriter();
+    exception.printStackTrace(new PrintWriter(writer));
+    String stacktrace = writer.toString();
+
     span.recordException(exception);
 
     List<EventData> events = span.toSpanData().getEvents();
     assertThat(events).hasSize(1);
     EventData event = events.get(0);
-    assertThat(event.getAttributes().get(SemanticAttributes.EXCEPTION_MESSAGE)).isNull();
+    assertThat(event.getAttributes().get(stringKey("exception.message"))).isNull();
+    assertThat(event.getAttributes().get(stringKey("exception.type")))
+        .isEqualTo("java.lang.IllegalStateException");
+    assertThat(event.getAttributes().get(stringKey("exception.stacktrace"))).isEqualTo(stacktrace);
+    assertThat(event.getAttributes().size()).isEqualTo(2);
   }
 
   private static class InnerClassException extends Exception {}
@@ -952,13 +1217,19 @@ class SdkSpanTest {
     InnerClassException exception = new InnerClassException();
     SdkSpan span = createTestRootSpan();
 
+    StringWriter writer = new StringWriter();
+    exception.printStackTrace(new PrintWriter(writer));
+    String stacktrace = writer.toString();
+
     span.recordException(exception);
 
     List<EventData> events = span.toSpanData().getEvents();
     assertThat(events).hasSize(1);
     EventData event = events.get(0);
-    assertThat(event.getAttributes().get(SemanticAttributes.EXCEPTION_TYPE))
+    assertThat(event.getAttributes().get(stringKey("exception.type")))
         .isEqualTo("io.opentelemetry.sdk.trace.SdkSpanTest.InnerClassException");
+    assertThat(event.getAttributes().get(stringKey("exception.stacktrace"))).isEqualTo(stacktrace);
+    assertThat(event.getAttributes().size()).isEqualTo(2);
   }
 
   @Test
@@ -973,6 +1244,9 @@ class SdkSpanTest {
     testClock.advance(Duration.ofNanos(1000));
     long timestamp = testClock.now();
 
+    // make sure that span attributes don't leak down to the exception event
+    span.setAttribute("spankey", "val");
+
     span.recordException(
         exception,
         Attributes.of(
@@ -986,27 +1260,20 @@ class SdkSpanTest {
     EventData event = events.get(0);
     assertThat(event.getName()).isEqualTo("exception");
     assertThat(event.getEpochNanos()).isEqualTo(timestamp);
-    assertThat(event.getAttributes())
-        .isEqualTo(
-            Attributes.builder()
-                .put("key1", "this is an additional attribute")
-                .put("exception.type", "java.lang.IllegalStateException")
-                .put("exception.message", "this is a precedence attribute")
-                .put("exception.stacktrace", stacktrace)
-                .build());
+    assertThat(event.getAttributes().get(stringKey("exception.message")))
+        .isEqualTo("this is a precedence attribute");
+    assertThat(event.getAttributes().get(stringKey("key1")))
+        .isEqualTo("this is an additional attribute");
+    assertThat(event.getAttributes().get(stringKey("exception.type")))
+        .isEqualTo("java.lang.IllegalStateException");
+    assertThat(event.getAttributes().get(stringKey("exception.stacktrace"))).isEqualTo(stacktrace);
+    assertThat(event.getAttributes().size()).isEqualTo(4);
 
     assertThat(event)
         .isInstanceOfSatisfying(
             ExceptionEventData.class,
             exceptionEvent -> {
               assertThat(exceptionEvent.getException()).isSameAs(exception);
-              assertThat(exceptionEvent.getAdditionalAttributes())
-                  .isEqualTo(
-                      Attributes.of(
-                          stringKey("key1"),
-                          "this is an additional attribute",
-                          stringKey("exception.message"),
-                          "this is a precedence attribute"));
             });
   }
 
@@ -1039,6 +1306,96 @@ class SdkSpanTest {
     assertThat(data.getAttributes().isEmpty()).isTrue();
     assertThat(data.getStatus()).isEqualTo(StatusData.unset());
     assertThat(data.getName()).isEqualTo(SPAN_NAME);
+  }
+
+  @Test
+  void onStartOnEndNotRequired() {
+    when(spanProcessor.isStartRequired()).thenReturn(false);
+    when(spanProcessor.isEndRequired()).thenReturn(false);
+
+    SpanLimits spanLimits = SpanLimits.getDefault();
+    SdkSpan span =
+        SdkSpan.startSpan(
+            spanContext,
+            SPAN_NAME,
+            instrumentationScopeInfo,
+            SpanKind.INTERNAL,
+            parentSpanId != null
+                ? Span.wrap(
+                    SpanContext.create(
+                        traceId, parentSpanId, TraceFlags.getDefault(), TraceState.getDefault()))
+                : Span.getInvalid(),
+            Context.root(),
+            spanLimits,
+            spanProcessor,
+            testClock,
+            resource,
+            AttributesMap.create(
+                spanLimits.getMaxNumberOfAttributes(), spanLimits.getMaxAttributeValueLength()),
+            Collections.emptyList(),
+            1,
+            0);
+    verify(spanProcessor, never()).onStart(any(), any());
+
+    span.end();
+    verify(spanProcessor, never()).onEnd(any());
+  }
+
+  @ParameterizedTest
+  @MethodSource("setStatusArgs")
+  void setStatus(Consumer<Span> spanConsumer, StatusData expectedSpanData) {
+    SdkSpan testSpan = createTestRootSpan();
+    spanConsumer.accept(testSpan);
+    assertThat(testSpan.toSpanData().getStatus()).isEqualTo(expectedSpanData);
+  }
+
+  private static Stream<Arguments> setStatusArgs() {
+    return Stream.of(
+        // Default status is UNSET
+        Arguments.of(spanConsumer(span -> {}), StatusData.unset()),
+        // Simple cases
+        Arguments.of(spanConsumer(span -> span.setStatus(StatusCode.OK)), StatusData.ok()),
+        Arguments.of(spanConsumer(span -> span.setStatus(StatusCode.ERROR)), StatusData.error()),
+        // UNSET is ignored
+        Arguments.of(
+            spanConsumer(span -> span.setStatus(StatusCode.OK).setStatus(StatusCode.UNSET)),
+            StatusData.ok()),
+        Arguments.of(
+            spanConsumer(span -> span.setStatus(StatusCode.ERROR).setStatus(StatusCode.UNSET)),
+            StatusData.error()),
+        // Description is ignored unless status is ERROR
+        Arguments.of(
+            spanConsumer(span -> span.setStatus(StatusCode.UNSET, "description")),
+            StatusData.unset()),
+        Arguments.of(
+            spanConsumer(span -> span.setStatus(StatusCode.OK, "description")), StatusData.ok()),
+        Arguments.of(
+            spanConsumer(span -> span.setStatus(StatusCode.ERROR, "description")),
+            StatusData.create(StatusCode.ERROR, "description")),
+        // ERROR is ignored if status is OK
+        Arguments.of(
+            spanConsumer(
+                span -> span.setStatus(StatusCode.OK).setStatus(StatusCode.ERROR, "description")),
+            StatusData.ok()),
+        // setStatus ignored after span is ended
+        Arguments.of(
+            spanConsumer(
+                span -> {
+                  span.end();
+                  span.setStatus(StatusCode.OK);
+                }),
+            StatusData.unset()),
+        Arguments.of(
+            spanConsumer(
+                span -> {
+                  span.end();
+                  span.setStatus(StatusCode.ERROR);
+                }),
+            StatusData.unset()));
+  }
+
+  private static Consumer<Span> spanConsumer(Consumer<Span> spanConsumer) {
+    return spanConsumer;
   }
 
   private SdkSpan createTestSpanWithAttributes(Map<AttributeKey, Object> attributes) {
@@ -1079,7 +1436,8 @@ class SdkSpanTest {
       SpanLimits config,
       @Nullable String parentSpanId,
       @Nullable AttributesMap attributes,
-      List<LinkData> links) {
+      @Nullable List<LinkData> links) {
+    List<LinkData> linksCopy = links == null ? new ArrayList<>() : new ArrayList<>(links);
 
     SdkSpan span =
         SdkSpan.startSpan(
@@ -1098,8 +1456,8 @@ class SdkSpanTest {
             testClock,
             resource,
             attributes,
-            links,
-            1,
+            linksCopy,
+            linksCopy.size(),
             0);
     Mockito.verify(spanProcessor, Mockito.times(1)).onStart(Context.root(), span);
     return span;

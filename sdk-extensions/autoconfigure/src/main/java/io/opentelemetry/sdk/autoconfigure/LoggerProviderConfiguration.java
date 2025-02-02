@@ -8,6 +8,7 @@ package io.opentelemetry.sdk.autoconfigure;
 import static io.opentelemetry.sdk.autoconfigure.LogRecordExporterConfiguration.configureLogRecordExporters;
 
 import io.opentelemetry.api.metrics.MeterProvider;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 import io.opentelemetry.sdk.logs.LogLimits;
 import io.opentelemetry.sdk.logs.LogLimitsBuilder;
@@ -20,6 +21,7 @@ import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,23 +29,34 @@ import java.util.function.BiFunction;
 
 final class LoggerProviderConfiguration {
 
+  private static final List<String> simpleProcessorExporterNames =
+      Arrays.asList("console", "logging");
+
   static void configureLoggerProvider(
       SdkLoggerProviderBuilder loggerProviderBuilder,
       ConfigProperties config,
-      ClassLoader serviceClassLoader,
+      SpiHelper spiHelper,
       MeterProvider meterProvider,
       BiFunction<? super LogRecordExporter, ConfigProperties, ? extends LogRecordExporter>
           logRecordExporterCustomizer,
+      BiFunction<? super LogRecordProcessor, ConfigProperties, ? extends LogRecordProcessor>
+          logRecordProcessorCustomizer,
       List<Closeable> closeables) {
 
     loggerProviderBuilder.setLogLimits(() -> configureLogLimits(config));
 
     Map<String, LogRecordExporter> exportersByName =
-        configureLogRecordExporters(
-            config, serviceClassLoader, logRecordExporterCustomizer, closeables);
+        configureLogRecordExporters(config, spiHelper, logRecordExporterCustomizer, closeables);
 
-    configureLogRecordProcessors(config, exportersByName, meterProvider, closeables)
-        .forEach(loggerProviderBuilder::addLogRecordProcessor);
+    List<LogRecordProcessor> processors =
+        configureLogRecordProcessors(config, exportersByName, meterProvider, closeables);
+    for (LogRecordProcessor processor : processors) {
+      LogRecordProcessor wrapped = logRecordProcessorCustomizer.apply(processor, config);
+      if (wrapped != processor) {
+        closeables.add(wrapped);
+      }
+      loggerProviderBuilder.addLogRecordProcessor(wrapped);
+    }
   }
 
   // Visible for testing
@@ -55,11 +68,13 @@ final class LoggerProviderConfiguration {
     Map<String, LogRecordExporter> exportersByNameCopy = new HashMap<>(exportersByName);
     List<LogRecordProcessor> logRecordProcessors = new ArrayList<>();
 
-    LogRecordExporter exporter = exportersByNameCopy.remove("logging");
-    if (exporter != null) {
-      LogRecordProcessor logRecordProcessor = SimpleLogRecordProcessor.create(exporter);
-      closeables.add(logRecordProcessor);
-      logRecordProcessors.add(logRecordProcessor);
+    for (String simpleProcessorExporterName : simpleProcessorExporterNames) {
+      LogRecordExporter exporter = exportersByNameCopy.remove(simpleProcessorExporterName);
+      if (exporter != null) {
+        LogRecordProcessor logRecordProcessor = SimpleLogRecordProcessor.create(exporter);
+        closeables.add(logRecordProcessor);
+        logRecordProcessors.add(logRecordProcessor);
+      }
     }
 
     if (!exportersByNameCopy.isEmpty()) {

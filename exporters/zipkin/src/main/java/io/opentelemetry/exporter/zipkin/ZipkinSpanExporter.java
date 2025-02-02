@@ -5,6 +5,7 @@
 
 package io.opentelemetry.exporter.zipkin;
 
+import io.opentelemetry.api.internal.InstrumentationUtil;
 import io.opentelemetry.api.metrics.MeterProvider;
 import io.opentelemetry.exporter.internal.ExporterMetrics;
 import io.opentelemetry.sdk.common.CompletableResultCode;
@@ -19,11 +20,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import zipkin2.Callback;
 import zipkin2.Span;
-import zipkin2.codec.BytesEncoder;
-import zipkin2.codec.Encoding;
-import zipkin2.reporter.Sender;
+import zipkin2.reporter.BytesEncoder;
+import zipkin2.reporter.BytesMessageSender;
+import zipkin2.reporter.Encoding;
 
 /**
  * This class was based on the <a
@@ -38,17 +38,20 @@ public final class ZipkinSpanExporter implements SpanExporter {
 
   private final ThrottlingLogger logger = new ThrottlingLogger(baseLogger);
   private final AtomicBoolean isShutdown = new AtomicBoolean();
+  private final ZipkinSpanExporterBuilder builder;
   private final BytesEncoder<Span> encoder;
-  private final Sender sender;
+  private final BytesMessageSender sender;
   private final ExporterMetrics exporterMetrics;
 
   private final OtelToZipkinSpanTransformer transformer;
 
   ZipkinSpanExporter(
+      ZipkinSpanExporterBuilder builder,
       BytesEncoder<Span> encoder,
-      Sender sender,
+      BytesMessageSender sender,
       Supplier<MeterProvider> meterProviderSupplier,
       OtelToZipkinSpanTransformer transformer) {
+    this.builder = builder;
     this.encoder = encoder;
     this.sender = sender;
     this.exporterMetrics =
@@ -73,25 +76,20 @@ public final class ZipkinSpanExporter implements SpanExporter {
       encodedSpans.add(encoder.encode(zipkinSpan));
     }
 
-    CompletableResultCode result = new CompletableResultCode();
-    sender
-        .sendSpans(encodedSpans)
-        .enqueue(
-            new Callback<Void>() {
-              @Override
-              public void onSuccess(Void value) {
-                exporterMetrics.addSuccess(numItems);
-                result.succeed();
-              }
-
-              @Override
-              public void onError(Throwable t) {
-                exporterMetrics.addFailed(numItems);
-                logger.log(Level.WARNING, "Failed to export spans", t);
-                result.fail();
-              }
-            });
-    return result;
+    CompletableResultCode resultCode = new CompletableResultCode();
+    InstrumentationUtil.suppressInstrumentation(
+        () -> {
+          try {
+            sender.send(encodedSpans);
+            exporterMetrics.addSuccess(numItems);
+            resultCode.succeed();
+          } catch (IOException | RuntimeException e) {
+            exporterMetrics.addFailed(numItems);
+            logger.log(Level.WARNING, "Failed to export spans", e);
+            resultCode.fail();
+          }
+        });
+    return resultCode;
   }
 
   @Override
@@ -112,6 +110,11 @@ public final class ZipkinSpanExporter implements SpanExporter {
       logger.log(Level.WARNING, "Exception while closing the Zipkin Sender instance", e);
     }
     return CompletableResultCode.ofSuccess();
+  }
+
+  @Override
+  public String toString() {
+    return "ZipkinSpanExporter{" + builder.toString(false) + "}";
   }
 
   /**

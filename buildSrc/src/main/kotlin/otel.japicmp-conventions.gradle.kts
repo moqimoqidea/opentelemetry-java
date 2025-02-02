@@ -1,15 +1,8 @@
 import com.google.auto.value.AutoValue
-import japicmp.model.JApiChangeStatus
-import japicmp.model.JApiCompatibility
-import japicmp.model.JApiCompatibilityChange
-import japicmp.model.JApiMethod
+import japicmp.model.*
 import me.champeau.gradle.japicmp.JapicmpTask
 import me.champeau.gradle.japicmp.report.Violation
-import me.champeau.gradle.japicmp.report.stdrules.AbstractRecordingSeenMembers
-import me.champeau.gradle.japicmp.report.stdrules.BinaryIncompatibleRule
-import me.champeau.gradle.japicmp.report.stdrules.RecordSeenMembersSetup
-import me.champeau.gradle.japicmp.report.stdrules.SourceCompatibleRule
-import me.champeau.gradle.japicmp.report.stdrules.UnchangedMemberRule
+import me.champeau.gradle.japicmp.report.stdrules.*
 
 
 plugins {
@@ -34,20 +27,30 @@ val latestReleasedVersion: String by lazy {
 
 class AllowNewAbstractMethodOnAutovalueClasses : AbstractRecordingSeenMembers() {
   override fun maybeAddViolation(member: JApiCompatibility): Violation? {
-    if (member.compatibilityChanges == listOf(JApiCompatibilityChange.METHOD_ABSTRACT_ADDED_TO_CLASS) &&
-      member is JApiMethod &&
-      member.getjApiClass().newClass.get().getAnnotation(AutoValue::class.java) != null
-    ) {
+    val allowableAutovalueChanges = setOf(JApiCompatibilityChangeType.METHOD_ABSTRACT_ADDED_TO_CLASS,
+      JApiCompatibilityChangeType.METHOD_ADDED_TO_PUBLIC_CLASS, JApiCompatibilityChangeType.ANNOTATION_ADDED)
+    if (member.compatibilityChanges.filter { !allowableAutovalueChanges.contains(it.type) }.isEmpty() &&
+      member is JApiMethod && isAutoValueClass(member.getjApiClass()))
+    {
       return Violation.accept(member, "Autovalue will automatically add implementation")
     }
+    if (member.compatibilityChanges.isEmpty() &&
+      member is JApiClass && isAutoValueClass(member)) {
+      return Violation.accept(member, "Autovalue class modification is allowed")
+    }
     return null
+  }
+
+  fun isAutoValueClass(japiClass: JApiClass): Boolean {
+    return japiClass.newClass.get().getAnnotation(AutoValue::class.java) != null ||
+        japiClass.newClass.get().getAnnotation(AutoValue.Builder::class.java) != null
   }
 }
 
 class SourceIncompatibleRule : AbstractRecordingSeenMembers() {
   override fun maybeAddViolation(member: JApiCompatibility): Violation? {
     if (!member.isSourceCompatible()) {
-      return Violation.error(member, "Not source compatible")
+      return Violation.error(member, "Not source compatible: $member")
     }
     return null
   }
@@ -108,6 +111,8 @@ if (!project.hasProperty("otel.release") && !project.name.startsWith("bom")) {
         // Reproduce defaults from https://github.com/melix/japicmp-gradle-plugin/blob/09f52739ef1fccda6b4310cf3f4b19dc97377024/src/main/java/me/champeau/gradle/japicmp/report/ViolationsGenerator.java#L130
         // with some changes.
         val exclusions = mutableListOf<String>()
+        // Generics are not detected correctly
+        exclusions.add("CLASS_GENERIC_TEMPLATE_CHANGED")
         // Allow new default methods on interfaces
         exclusions.add("METHOD_NEW_DEFAULT")
         // Allow adding default implementations for default methods
@@ -130,7 +135,13 @@ if (!project.hasProperty("otel.release") && !project.name.startsWith("bom")) {
 
         // this is needed so that we only consider the current artifact, and not dependencies
         ignoreMissingClasses.set(true)
-        packageExcludes.addAll("*.internal", "*.internal.*", "io.opentelemetry.internal.shaded.jctools.*")
+        packageExcludes.addAll(
+          "*.internal",
+          "*.internal.*",
+          "io.opentelemetry.internal.shaded.jctools.*",
+          // Temporarily suppress warnings from public generated classes from :sdk-extensions:jaeger-remote-sampler
+          "io.opentelemetry.sdk.extension.trace.jaeger.proto.api_v2"
+        )
         val baseVersionString = if (apiBaseVersion == null) "latest" else baselineVersion
         txtOutputFile.set(
           apiNewVersion?.let { file("$rootDir/docs/apidiffs/${apiNewVersion}_vs_$baselineVersion/${base.archivesName.get()}.txt") }

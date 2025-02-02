@@ -9,15 +9,28 @@ import static io.opentelemetry.api.internal.Utils.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 import io.opentelemetry.api.metrics.MeterProvider;
-import io.opentelemetry.exporter.internal.okhttp.OkHttpExporterBuilder;
-import io.opentelemetry.exporter.internal.otlp.OtlpUserAgent;
-import io.opentelemetry.exporter.internal.otlp.metrics.MetricsRequestMarshaler;
+import io.opentelemetry.exporter.internal.compression.Compressor;
+import io.opentelemetry.exporter.internal.compression.CompressorProvider;
+import io.opentelemetry.exporter.internal.compression.CompressorUtil;
+import io.opentelemetry.exporter.internal.http.HttpExporterBuilder;
+import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.otlp.internal.OtlpUserAgent;
+import io.opentelemetry.sdk.common.export.MemoryMode;
+import io.opentelemetry.sdk.common.export.ProxyOptions;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import io.opentelemetry.sdk.metrics.InstrumentType;
+import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.metrics.export.AggregationTemporalitySelector;
 import io.opentelemetry.sdk.metrics.export.DefaultAggregationSelector;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import java.time.Duration;
+import java.util.Collection;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.X509TrustManager;
 
 /**
  * Builder utility for {@link OtlpHttpMetricExporter}.
@@ -30,23 +43,30 @@ public final class OtlpHttpMetricExporterBuilder {
 
   private static final AggregationTemporalitySelector DEFAULT_AGGREGATION_TEMPORALITY_SELECTOR =
       AggregationTemporalitySelector.alwaysCumulative();
+  private static final MemoryMode DEFAULT_MEMORY_MODE = MemoryMode.REUSABLE_DATA;
 
-  private final OkHttpExporterBuilder<MetricsRequestMarshaler> delegate;
+  private final HttpExporterBuilder<Marshaler> delegate;
   private AggregationTemporalitySelector aggregationTemporalitySelector =
       DEFAULT_AGGREGATION_TEMPORALITY_SELECTOR;
 
   private DefaultAggregationSelector defaultAggregationSelector =
       DefaultAggregationSelector.getDefault();
+  private MemoryMode memoryMode;
+
+  OtlpHttpMetricExporterBuilder(HttpExporterBuilder<Marshaler> delegate, MemoryMode memoryMode) {
+    this.delegate = delegate;
+    this.memoryMode = memoryMode;
+    delegate.setMeterProvider(MeterProvider::noop);
+    OtlpUserAgent.addUserAgentHeader(delegate::addConstantHeaders);
+  }
 
   OtlpHttpMetricExporterBuilder() {
-    delegate = new OkHttpExporterBuilder<>("otlp", "metric", DEFAULT_ENDPOINT);
-    delegate.setMeterProvider(MeterProvider.noop());
-    OtlpUserAgent.addUserAgentHeader(delegate::addHeader);
+    this(new HttpExporterBuilder<>("otlp", "metric", DEFAULT_ENDPOINT), DEFAULT_MEMORY_MODE);
   }
 
   /**
    * Sets the maximum time to wait for the collector to process an exported batch of metrics. If
-   * unset, defaults to {@value OkHttpExporterBuilder#DEFAULT_TIMEOUT_SECS}s.
+   * unset, defaults to {@value HttpExporterBuilder#DEFAULT_TIMEOUT_SECS}s.
    */
   public OtlpHttpMetricExporterBuilder setTimeout(long timeout, TimeUnit unit) {
     requireNonNull(unit, "unit");
@@ -57,11 +77,35 @@ public final class OtlpHttpMetricExporterBuilder {
 
   /**
    * Sets the maximum time to wait for the collector to process an exported batch of metrics. If
-   * unset, defaults to {@value OkHttpExporterBuilder#DEFAULT_TIMEOUT_SECS}s.
+   * unset, defaults to {@value HttpExporterBuilder#DEFAULT_TIMEOUT_SECS}s.
    */
   public OtlpHttpMetricExporterBuilder setTimeout(Duration timeout) {
     requireNonNull(timeout, "timeout");
     return setTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * Sets the maximum time to wait for new connections to be established. If unset, defaults to
+   * {@value HttpExporterBuilder#DEFAULT_CONNECT_TIMEOUT_SECS}s.
+   *
+   * @since 1.33.0
+   */
+  public OtlpHttpMetricExporterBuilder setConnectTimeout(long timeout, TimeUnit unit) {
+    requireNonNull(unit, "unit");
+    checkArgument(timeout >= 0, "timeout must be non-negative");
+    delegate.setConnectTimeout(timeout, unit);
+    return this;
+  }
+
+  /**
+   * Sets the maximum time to wait for new connections to be established. If unset, defaults to
+   * {@value HttpExporterBuilder#DEFAULT_CONNECT_TIMEOUT_SECS}s.
+   *
+   * @since 1.33.0
+   */
+  public OtlpHttpMetricExporterBuilder setConnectTimeout(Duration timeout) {
+    requireNonNull(timeout, "timeout");
+    return setConnectTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
   }
 
   /**
@@ -75,21 +119,34 @@ public final class OtlpHttpMetricExporterBuilder {
   }
 
   /**
-   * Sets the method used to compress payloads. If unset, compression is disabled. Currently
-   * supported compression methods include "gzip" and "none".
+   * Sets the method used to compress payloads. If unset, compression is disabled. Compression
+   * method "gzip" and "none" are supported out of the box. Support for additional compression
+   * methods is available by implementing {@link Compressor} and {@link CompressorProvider}.
    */
   public OtlpHttpMetricExporterBuilder setCompression(String compressionMethod) {
     requireNonNull(compressionMethod, "compressionMethod");
-    checkArgument(
-        compressionMethod.equals("gzip") || compressionMethod.equals("none"),
-        "Unsupported compression method. Supported compression methods include: gzip, none.");
-    delegate.setCompression(compressionMethod);
+    Compressor compressor = CompressorUtil.validateAndResolveCompressor(compressionMethod);
+    delegate.setCompression(compressor);
     return this;
   }
 
-  /** Add header to requests. */
+  /**
+   * Add a constant header to requests. If the {@code key} collides with another constant header
+   * name or a one from {@link #setHeaders(Supplier)}, the values from both are included.
+   */
   public OtlpHttpMetricExporterBuilder addHeader(String key, String value) {
-    delegate.addHeader(key, value);
+    delegate.addConstantHeaders(key, value);
+    return this;
+  }
+
+  /**
+   * Set the supplier of headers to add to requests. If a key from the map collides with a constant
+   * from {@link #addHeader(String, String)}, the values from both are included.
+   *
+   * @since 1.33.0
+   */
+  public OtlpHttpMetricExporterBuilder setHeaders(Supplier<Map<String, String>> headerSupplier) {
+    delegate.setHeadersSupplier(headerSupplier);
     return this;
   }
 
@@ -99,7 +156,7 @@ public final class OtlpHttpMetricExporterBuilder {
    * use the system default trusted certificates.
    */
   public OtlpHttpMetricExporterBuilder setTrustedCertificates(byte[] trustedCertificatesPem) {
-    delegate.setTrustedCertificates(trustedCertificatesPem);
+    delegate.setTrustManagerFromCerts(trustedCertificatesPem);
     return this;
   }
 
@@ -108,7 +165,19 @@ public final class OtlpHttpMetricExporterBuilder {
    * The key must be PKCS8, and both must be in PEM format.
    */
   public OtlpHttpMetricExporterBuilder setClientTls(byte[] privateKeyPem, byte[] certificatePem) {
-    delegate.setClientTls(privateKeyPem, certificatePem);
+    delegate.setKeyManagerFromCerts(privateKeyPem, certificatePem);
+    return this;
+  }
+
+  /**
+   * Sets the "bring-your-own" SSLContext for use with TLS. Users should call this _or_ set raw
+   * certificate bytes, but not both.
+   *
+   * @since 1.26.0
+   */
+  public OtlpHttpMetricExporterBuilder setSslContext(
+      SSLContext sslContext, X509TrustManager trustManager) {
+    delegate.setSslContext(sslContext, trustManager);
     return this;
   }
 
@@ -143,6 +212,47 @@ public final class OtlpHttpMetricExporterBuilder {
     return this;
   }
 
+  /**
+   * Set the retry policy, or {@code null} to disable retry. Retry policy is {@link
+   * RetryPolicy#getDefault()} by default
+   *
+   * @since 1.28.0
+   */
+  public OtlpHttpMetricExporterBuilder setRetryPolicy(@Nullable RetryPolicy retryPolicy) {
+    delegate.setRetryPolicy(retryPolicy);
+    return this;
+  }
+
+  /**
+   * Sets the proxy options. Proxying is disabled by default.
+   *
+   * @since 1.36.0
+   */
+  public OtlpHttpMetricExporterBuilder setProxyOptions(ProxyOptions proxyOptions) {
+    requireNonNull(proxyOptions, "proxyOptions");
+    delegate.setProxyOptions(proxyOptions);
+    return this;
+  }
+
+  /**
+   * Set the {@link MemoryMode}. If unset, defaults to {@link #DEFAULT_MEMORY_MODE}.
+   *
+   * <p>When memory mode is {@link MemoryMode#REUSABLE_DATA}, serialization is optimized to reduce
+   * memory allocation. Additionally, the value is used for {@link MetricExporter#getMemoryMode()},
+   * which sends a signal to the metrics SDK to reuse memory when possible. This is safe and
+   * desirable for most use cases, but should be used with caution of wrapping and delegating to the
+   * exporter. It is not safe for the wrapping exporter to hold onto references to {@link
+   * MetricData} batches since the same data structures will be reused in subsequent calls to {@link
+   * MetricExporter#export(Collection)}.
+   *
+   * @since 1.39.0
+   */
+  public OtlpHttpMetricExporterBuilder setMemoryMode(MemoryMode memoryMode) {
+    requireNonNull(memoryMode, "memoryMode");
+    this.memoryMode = memoryMode;
+    return this;
+  }
+
   OtlpHttpMetricExporterBuilder exportAsJson() {
     delegate.exportAsJson();
     return this;
@@ -155,6 +265,10 @@ public final class OtlpHttpMetricExporterBuilder {
    */
   public OtlpHttpMetricExporter build() {
     return new OtlpHttpMetricExporter(
-        delegate.build(), aggregationTemporalitySelector, defaultAggregationSelector);
+        delegate,
+        delegate.build(),
+        aggregationTemporalitySelector,
+        defaultAggregationSelector,
+        memoryMode);
   }
 }

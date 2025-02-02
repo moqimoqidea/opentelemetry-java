@@ -32,6 +32,7 @@ import javax.annotation.concurrent.Immutable;
 @Immutable
 public abstract class ImmutableKeyValuePairs<K, V> {
   private final Object[] data;
+  private int hashcode;
 
   /**
    * Stores the raw object data directly. Does not do any de-duping or sorting. If you use this
@@ -247,9 +248,13 @@ public abstract class ImmutableKeyValuePairs<K, V> {
 
   @Override
   public int hashCode() {
-    int result = 1;
-    result *= 1000003;
-    result ^= Arrays.hashCode(data);
+    int result = hashcode;
+    if (result == 0) {
+      result = 1;
+      result *= 1000003;
+      result ^= Arrays.hashCode(data);
+      hashcode = result;
+    }
     return result;
   }
 
@@ -268,5 +273,14 @@ public abstract class ImmutableKeyValuePairs<K, V> {
     }
     sb.append("}");
     return sb.toString();
+  }
+
+  /**
+   * Return the backing data array for these attributes. This is only exposed for internal use by
+   * opentelemetry authors. The contents of the array MUST NOT be modified.
+   */
+  @SuppressWarnings("AvoidObjectArrays")
+  public Object[] getData() {
+    return data;
   }
 }

@@ -34,7 +34,7 @@ public class JaegerRemoteSamplerProviderTest {
         .thenReturn("test_service");
     HashMap<String, String> samplerArgs = new HashMap<>();
     samplerArgs.put("endpoint", "http://localhost:9999");
-    samplerArgs.put("pollingInterval", "99");
+    samplerArgs.put("pollingIntervalMs", "99");
     double samplingRate = 0.33;
     samplerArgs.put("initialSamplingRate", String.valueOf(samplingRate));
     when(mockConfig.getMap(JaegerRemoteSamplerProvider.SAMPLER_ARG_PROPERTY))
@@ -66,7 +66,8 @@ public class JaegerRemoteSamplerProviderTest {
   void serviceNameInAttributeProperties() {
     ConfigProperties mockConfig = mock(ConfigProperties.class);
     HashMap<String, String> attributeProperties = new HashMap<>();
-    attributeProperties.put(JaegerRemoteSamplerProvider.SERVICE_NAME_PROPERTY, "test_service2");
+    attributeProperties.put(
+        JaegerRemoteSamplerProvider.RESOURCE_ATTRIBUTE_SERVICE_NAME_PROPERTY, "test_service2");
     when(mockConfig.getMap(JaegerRemoteSamplerProvider.ATTRIBUTE_PROPERTY))
         .thenReturn(attributeProperties);
     ServiceLoader<ConfigurableSamplerProvider> samplerProviders =

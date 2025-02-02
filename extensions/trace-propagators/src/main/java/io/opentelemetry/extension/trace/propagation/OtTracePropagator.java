@@ -5,6 +5,7 @@
 
 package io.opentelemetry.extension.trace.propagation;
 
+import static io.opentelemetry.extension.trace.propagation.Common.MAX_SPAN_ID_LENGTH;
 import static io.opentelemetry.extension.trace.propagation.Common.MAX_TRACE_ID_LENGTH;
 
 import io.opentelemetry.api.baggage.Baggage;
@@ -12,6 +13,7 @@ import io.opentelemetry.api.baggage.BaggageBuilder;
 import io.opentelemetry.api.internal.StringUtils;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.SpanId;
 import io.opentelemetry.api.trace.TraceId;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
@@ -20,6 +22,7 @@ import io.opentelemetry.context.propagation.TextMapSetter;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Locale;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
@@ -95,7 +98,13 @@ public final class OtTracePropagator implements TextMapPropagator {
         incomingTraceId == null
             ? TraceId.getInvalid()
             : StringUtils.padLeft(incomingTraceId, MAX_TRACE_ID_LENGTH);
-    String spanId = getter.get(carrier, SPAN_ID_HEADER);
+
+    String incomingSpanId = getter.get(carrier, SPAN_ID_HEADER);
+    String spanId =
+        incomingSpanId == null
+            ? SpanId.getInvalid()
+            : StringUtils.padLeft(incomingSpanId, MAX_SPAN_ID_LENGTH);
+
     String sampled = getter.get(carrier, SAMPLED_HEADER);
     SpanContext spanContext = buildSpanContext(traceId, spanId, sampled);
     if (!spanContext.isValid()) {
@@ -108,14 +117,17 @@ public final class OtTracePropagator implements TextMapPropagator {
     if (carrier != null) {
       BaggageBuilder baggageBuilder = Baggage.builder();
       for (String key : getter.keys(carrier)) {
-        if (!key.startsWith(PREFIX_BAGGAGE_HEADER)) {
+        String lowercaseKey = key.toLowerCase(Locale.ROOT);
+        if (!lowercaseKey.startsWith(PREFIX_BAGGAGE_HEADER)) {
           continue;
         }
         String value = getter.get(carrier, key);
         if (value == null) {
           continue;
         }
-        baggageBuilder.put(key.replace(OtTracePropagator.PREFIX_BAGGAGE_HEADER, ""), value);
+        String baggageKey =
+            lowercaseKey.substring(OtTracePropagator.PREFIX_BAGGAGE_HEADER.length());
+        baggageBuilder.put(baggageKey, value);
       }
       Baggage baggage = baggageBuilder.build();
       if (!baggage.isEmpty()) {

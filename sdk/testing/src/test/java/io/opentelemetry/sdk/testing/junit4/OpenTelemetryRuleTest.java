@@ -7,6 +7,8 @@ package io.opentelemetry.sdk.testing.junit4;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.opentelemetry.api.common.Value;
+import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
@@ -21,11 +23,13 @@ public class OpenTelemetryRuleTest {
 
   private Tracer tracer;
   private Meter meter;
+  private Logger logger;
 
   @Before
   public void setup() {
     tracer = otelTesting.getOpenTelemetry().getTracer("test");
     meter = otelTesting.getOpenTelemetry().getMeter("test");
+    logger = otelTesting.getOpenTelemetry().getLogsBridge().get("test");
   }
 
   @Test
@@ -82,5 +86,36 @@ public class OpenTelemetryRuleTest {
                     .hasName("counter")
                     .hasLongSumSatisfying(
                         sum -> sum.hasPointsSatisfying(point -> point.hasValue(1))));
+  }
+
+  @Test
+  public void getLogRecords() {
+    logger.logRecordBuilder().setBody("body").emit();
+
+    assertThat(otelTesting.getLogRecords())
+        .singleElement()
+        .satisfies(
+            logRecordData -> assertThat(logRecordData.getBodyValue()).isEqualTo(Value.of("body")));
+    // Logs cleared between tests, not when retrieving
+    assertThat(otelTesting.getLogRecords())
+        .singleElement()
+        .satisfies(
+            logRecordData -> assertThat(logRecordData.getBodyValue()).isEqualTo(Value.of("body")));
+  }
+
+  // We have two tests to verify logs get cleared up between tests.
+  @Test
+  public void getLogRecordsAgain() {
+    logger.logRecordBuilder().setBody("body").emit();
+
+    assertThat(otelTesting.getLogRecords())
+        .singleElement()
+        .satisfies(
+            logRecordData -> assertThat(logRecordData.getBodyValue()).isEqualTo(Value.of("body")));
+    // Logs cleared between tests, not when retrieving
+    assertThat(otelTesting.getLogRecords())
+        .singleElement()
+        .satisfies(
+            logRecordData -> assertThat(logRecordData.getBodyValue()).isEqualTo(Value.of("body")));
   }
 }

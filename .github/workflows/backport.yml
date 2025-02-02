@@ -16,7 +16,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           # history is needed to run git cherry-pick below
           fetch-depth: 0
@@ -28,7 +28,7 @@ jobs:
         env:
           NUMBER: ${{ github.event.inputs.number }}
           # not using secrets.GITHUB_TOKEN since pull requests from that token do not run workflows
-          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.OPENTELEMETRYBOT_GITHUB_TOKEN }}
         run: |
           commit=$(gh pr view $NUMBER --json mergeCommit --jq .mergeCommit.oid)
           title=$(gh pr view $NUMBER --json title --jq .title)

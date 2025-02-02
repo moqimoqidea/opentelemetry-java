@@ -21,6 +21,7 @@ import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.internal.JcTools;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -47,11 +48,12 @@ public final class BatchSpanProcessor implements SpanProcessor {
   private static final String WORKER_THREAD_NAME =
       BatchSpanProcessor.class.getSimpleName() + "_WorkerThread";
   private static final AttributeKey<String> SPAN_PROCESSOR_TYPE_LABEL =
-      AttributeKey.stringKey("spanProcessorType");
+      AttributeKey.stringKey("processorType");
   private static final AttributeKey<Boolean> SPAN_PROCESSOR_DROPPED_LABEL =
       AttributeKey.booleanKey("dropped");
   private static final String SPAN_PROCESSOR_TYPE_VALUE = BatchSpanProcessor.class.getSimpleName();
 
+  private final boolean exportUnsampledSpans;
   private final Worker worker;
   private final AtomicBoolean isShutdown = new AtomicBoolean(false);
 
@@ -68,11 +70,13 @@ public final class BatchSpanProcessor implements SpanProcessor {
 
   BatchSpanProcessor(
       SpanExporter spanExporter,
+      boolean exportUnsampledSpans,
       MeterProvider meterProvider,
       long scheduleDelayNanos,
       int maxQueueSize,
       int maxExportBatchSize,
       long exporterTimeoutNanos) {
+    this.exportUnsampledSpans = exportUnsampledSpans;
     this.worker =
         new Worker(
             spanExporter,
@@ -95,10 +99,9 @@ public final class BatchSpanProcessor implements SpanProcessor {
 
   @Override
   public void onEnd(ReadableSpan span) {
-    if (span == null || !span.getSpanContext().isSampled()) {
-      return;
+    if (span != null && (exportUnsampledSpans || span.getSpanContext().isSampled())) {
+      worker.addSpan(span);
     }
-    worker.addSpan(span);
   }
 
   @Override
@@ -119,8 +122,17 @@ public final class BatchSpanProcessor implements SpanProcessor {
     return worker.forceFlush();
   }
 
+  /**
+   * Return the processor's configured {@link SpanExporter}.
+   *
+   * @since 1.37.0
+   */
+  public SpanExporter getSpanExporter() {
+    return worker.spanExporter;
+  }
+
   // Visible for testing
-  ArrayList<SpanData> getBatch() {
+  List<SpanData> getBatch() {
     return worker.batch;
   }
 
@@ -134,6 +146,8 @@ public final class BatchSpanProcessor implements SpanProcessor {
     return "BatchSpanProcessor{"
         + "spanExporter="
         + worker.spanExporter
+        + ", exportUnsampledSpans="
+        + exportUnsampledSpans
         + ", scheduleDelayNanos="
         + worker.scheduleDelayNanos
         + ", maxExportBatchSize="
@@ -188,7 +202,7 @@ public final class BatchSpanProcessor implements SpanProcessor {
       meter
           .gaugeBuilder("queueSize")
           .ofLongs()
-          .setDescription("The number of spans queued")
+          .setDescription("The number of items queued")
           .setUnit("1")
           .buildWithCallback(
               result ->

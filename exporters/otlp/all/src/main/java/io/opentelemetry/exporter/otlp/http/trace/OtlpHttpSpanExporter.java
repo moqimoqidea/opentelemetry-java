@@ -5,12 +5,16 @@
 
 package io.opentelemetry.exporter.otlp.http.trace;
 
-import io.opentelemetry.exporter.internal.okhttp.OkHttpExporter;
-import io.opentelemetry.exporter.internal.otlp.traces.TraceRequestMarshaler;
+import io.opentelemetry.exporter.internal.http.HttpExporter;
+import io.opentelemetry.exporter.internal.http.HttpExporterBuilder;
+import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.internal.otlp.traces.SpanReusableDataMarshaler;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.util.Collection;
+import java.util.StringJoiner;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -21,10 +25,17 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public final class OtlpHttpSpanExporter implements SpanExporter {
 
-  private final OkHttpExporter<TraceRequestMarshaler> delegate;
+  private final HttpExporterBuilder<Marshaler> builder;
+  private final HttpExporter<Marshaler> delegate;
+  private final SpanReusableDataMarshaler marshaler;
 
-  OtlpHttpSpanExporter(OkHttpExporter<TraceRequestMarshaler> delegate) {
+  OtlpHttpSpanExporter(
+      HttpExporterBuilder<Marshaler> builder,
+      HttpExporter<Marshaler> delegate,
+      MemoryMode memoryMode) {
+    this.builder = builder;
     this.delegate = delegate;
+    this.marshaler = new SpanReusableDataMarshaler(memoryMode, delegate::export);
   }
 
   /**
@@ -49,6 +60,17 @@ public final class OtlpHttpSpanExporter implements SpanExporter {
   }
 
   /**
+   * Returns a builder with configuration values equal to those for this exporter.
+   *
+   * <p>IMPORTANT: Be sure to {@link #shutdown()} this instance if it will no longer be used.
+   *
+   * @since 1.29.0
+   */
+  public OtlpHttpSpanExporterBuilder toBuilder() {
+    return new OtlpHttpSpanExporterBuilder(builder.copy(), marshaler.getMemoryMode());
+  }
+
+  /**
    * Submits all the given spans in a single batch to the OpenTelemetry collector.
    *
    * @param spans the list of sampled Spans to be exported.
@@ -56,8 +78,7 @@ public final class OtlpHttpSpanExporter implements SpanExporter {
    */
   @Override
   public CompletableResultCode export(Collection<SpanData> spans) {
-    TraceRequestMarshaler exportRequest = TraceRequestMarshaler.create(spans);
-    return delegate.export(exportRequest, spans.size());
+    return marshaler.export(spans);
   }
 
   /**
@@ -70,9 +91,17 @@ public final class OtlpHttpSpanExporter implements SpanExporter {
     return CompletableResultCode.ofSuccess();
   }
 
-  /** Shutdown the exporter. */
+  /** Shutdown the exporter, releasing any resources and preventing subsequent exports. */
   @Override
   public CompletableResultCode shutdown() {
     return delegate.shutdown();
+  }
+
+  @Override
+  public String toString() {
+    StringJoiner joiner = new StringJoiner(", ", "OtlpHttpSpanExporter{", "}");
+    joiner.add(builder.toString(false));
+    joiner.add("memoryMode=" + marshaler.getMemoryMode());
+    return joiner.toString();
   }
 }

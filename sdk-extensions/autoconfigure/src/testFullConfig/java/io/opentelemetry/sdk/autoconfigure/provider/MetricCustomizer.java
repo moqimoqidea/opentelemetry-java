@@ -19,6 +19,7 @@ import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import java.util.Collection;
 import java.util.stream.Collectors;
 
+/** Behavior asserted in {@link io.opentelemetry.sdk.autoconfigure.FullConfigTest}. */
 public class MetricCustomizer implements AutoConfigurationCustomizerProvider {
   @Override
   public void customize(AutoConfigurationCustomizer autoConfiguration) {
@@ -48,7 +49,13 @@ public class MetricCustomizer implements AutoConfigurationCustomizerProvider {
         // please configure the SdkMeterProvider with the appropriate view.
         Collection<MetricData> filtered =
             metrics.stream()
-                .filter(metricData -> metricData.getName().equals("my-metric"))
+                .filter(
+                    metricData ->
+                        metricData.getName().equals("my-metric")
+                            || metricData
+                                .getInstrumentationScopeInfo()
+                                .getName()
+                                .startsWith("io.opentelemetry.exporters"))
                 .collect(Collectors.toList());
         return delegate.export(filtered);
       }

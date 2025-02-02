@@ -5,9 +5,12 @@
 
 package io.opentelemetry.exporter.otlp.http.metrics;
 
-import io.opentelemetry.exporter.internal.okhttp.OkHttpExporter;
-import io.opentelemetry.exporter.internal.otlp.metrics.MetricsRequestMarshaler;
+import io.opentelemetry.exporter.internal.http.HttpExporter;
+import io.opentelemetry.exporter.internal.http.HttpExporterBuilder;
+import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.internal.otlp.metrics.MetricReusableDataMarshaler;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.metrics.Aggregation;
 import io.opentelemetry.sdk.metrics.InstrumentType;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
@@ -16,6 +19,7 @@ import io.opentelemetry.sdk.metrics.export.AggregationTemporalitySelector;
 import io.opentelemetry.sdk.metrics.export.DefaultAggregationSelector;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import java.util.Collection;
+import java.util.StringJoiner;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -26,17 +30,23 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public final class OtlpHttpMetricExporter implements MetricExporter {
 
-  private final OkHttpExporter<MetricsRequestMarshaler> delegate;
+  private final HttpExporterBuilder<Marshaler> builder;
+  private final HttpExporter<Marshaler> delegate;
   private final AggregationTemporalitySelector aggregationTemporalitySelector;
   private final DefaultAggregationSelector defaultAggregationSelector;
+  private final MetricReusableDataMarshaler marshaler;
 
   OtlpHttpMetricExporter(
-      OkHttpExporter<MetricsRequestMarshaler> delegate,
+      HttpExporterBuilder<Marshaler> builder,
+      HttpExporter<Marshaler> delegate,
       AggregationTemporalitySelector aggregationTemporalitySelector,
-      DefaultAggregationSelector defaultAggregationSelector) {
+      DefaultAggregationSelector defaultAggregationSelector,
+      MemoryMode memoryMode) {
+    this.builder = builder;
     this.delegate = delegate;
     this.aggregationTemporalitySelector = aggregationTemporalitySelector;
     this.defaultAggregationSelector = defaultAggregationSelector;
+    this.marshaler = new MetricReusableDataMarshaler(memoryMode, delegate::export);
   }
 
   /**
@@ -60,6 +70,17 @@ public final class OtlpHttpMetricExporter implements MetricExporter {
     return new OtlpHttpMetricExporterBuilder();
   }
 
+  /**
+   * Returns a builder with configuration values equal to those for this exporter.
+   *
+   * <p>IMPORTANT: Be sure to {@link #shutdown()} this instance if it will no longer be used.
+   *
+   * @since 1.29.0
+   */
+  public OtlpHttpMetricExporterBuilder toBuilder() {
+    return new OtlpHttpMetricExporterBuilder(builder.copy(), marshaler.getMemoryMode());
+  }
+
   @Override
   public AggregationTemporality getAggregationTemporality(InstrumentType instrumentType) {
     return aggregationTemporalitySelector.getAggregationTemporality(instrumentType);
@@ -70,6 +91,11 @@ public final class OtlpHttpMetricExporter implements MetricExporter {
     return defaultAggregationSelector.getDefaultAggregation(instrumentType);
   }
 
+  @Override
+  public MemoryMode getMemoryMode() {
+    return marshaler.getMemoryMode();
+  }
+
   /**
    * Submits all the given metrics in a single batch to the OpenTelemetry collector.
    *
@@ -78,8 +104,7 @@ public final class OtlpHttpMetricExporter implements MetricExporter {
    */
   @Override
   public CompletableResultCode export(Collection<MetricData> metrics) {
-    MetricsRequestMarshaler exportRequest = MetricsRequestMarshaler.create(metrics);
-    return delegate.export(exportRequest, metrics.size());
+    return marshaler.export(metrics);
   }
 
   /**
@@ -96,5 +121,19 @@ public final class OtlpHttpMetricExporter implements MetricExporter {
   @Override
   public CompletableResultCode shutdown() {
     return delegate.shutdown();
+  }
+
+  @Override
+  public String toString() {
+    StringJoiner joiner = new StringJoiner(", ", "OtlpHttpMetricExporter{", "}");
+    joiner.add(builder.toString(false));
+    joiner.add(
+        "aggregationTemporalitySelector="
+            + AggregationTemporalitySelector.asString(aggregationTemporalitySelector));
+    joiner.add(
+        "defaultAggregationSelector="
+            + DefaultAggregationSelector.asString(defaultAggregationSelector));
+    joiner.add("memoryMode=" + marshaler.getMemoryMode());
+    return joiner.toString();
   }
 }

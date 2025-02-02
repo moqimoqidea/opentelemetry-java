@@ -8,6 +8,7 @@ package io.opentelemetry.sdk.metrics;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.opentelemetry.sdk.metrics.internal.aggregator.AggregatorFactory;
+import io.opentelemetry.sdk.metrics.internal.descriptor.Advice;
 import io.opentelemetry.sdk.metrics.internal.descriptor.InstrumentDescriptor;
 import java.util.Collections;
 import org.junit.jupiter.api.Test;
@@ -30,9 +31,9 @@ class AggregationTest {
     assertThat(Aggregation.base2ExponentialBucketHistogram())
         .asString()
         .isEqualTo("Base2ExponentialHistogramAggregation{maxBuckets=160,maxScale=20}");
-    assertThat(Aggregation.base2ExponentialBucketHistogram(1, 0))
+    assertThat(Aggregation.base2ExponentialBucketHistogram(2, 0))
         .asString()
-        .isEqualTo("Base2ExponentialHistogramAggregation{maxBuckets=1,maxScale=0}");
+        .isEqualTo("Base2ExponentialHistogramAggregation{maxBuckets=2,maxScale=0}");
   }
 
   @Test
@@ -50,11 +51,13 @@ class AggregationTest {
     InstrumentDescriptor observableUpDownCounter =
         descriptorForType(InstrumentType.OBSERVABLE_UP_DOWN_COUNTER);
     InstrumentDescriptor observableGauge = descriptorForType(InstrumentType.OBSERVABLE_GAUGE);
+    InstrumentDescriptor gauge = descriptorForType(InstrumentType.GAUGE);
     InstrumentDescriptor histogram = descriptorForType(InstrumentType.HISTOGRAM);
 
     AggregatorFactory defaultAggregation = ((AggregatorFactory) Aggregation.defaultAggregation());
     assertThat(defaultAggregation.isCompatibleWithInstrument(counter)).isTrue();
     assertThat(defaultAggregation.isCompatibleWithInstrument(observableCounter)).isTrue();
+    assertThat(defaultAggregation.isCompatibleWithInstrument(gauge)).isTrue();
     assertThat(defaultAggregation.isCompatibleWithInstrument(upDownCounter)).isTrue();
     assertThat(defaultAggregation.isCompatibleWithInstrument(observableUpDownCounter)).isTrue();
     assertThat(defaultAggregation.isCompatibleWithInstrument(observableGauge)).isTrue();
@@ -63,6 +66,7 @@ class AggregationTest {
     AggregatorFactory drop = ((AggregatorFactory) Aggregation.drop());
     assertThat(drop.isCompatibleWithInstrument(counter)).isTrue();
     assertThat(drop.isCompatibleWithInstrument(observableCounter)).isTrue();
+    assertThat(drop.isCompatibleWithInstrument(gauge)).isTrue();
     assertThat(drop.isCompatibleWithInstrument(upDownCounter)).isTrue();
     assertThat(drop.isCompatibleWithInstrument(observableUpDownCounter)).isTrue();
     assertThat(drop.isCompatibleWithInstrument(observableGauge)).isTrue();
@@ -74,6 +78,7 @@ class AggregationTest {
     assertThat(sum.isCompatibleWithInstrument(upDownCounter)).isTrue();
     assertThat(sum.isCompatibleWithInstrument(observableUpDownCounter)).isTrue();
     assertThat(sum.isCompatibleWithInstrument(observableGauge)).isFalse();
+    assertThat(sum.isCompatibleWithInstrument(gauge)).isFalse();
     assertThat(sum.isCompatibleWithInstrument(histogram)).isTrue();
 
     AggregatorFactory explicitHistogram =
@@ -83,6 +88,7 @@ class AggregationTest {
     assertThat(explicitHistogram.isCompatibleWithInstrument(upDownCounter)).isFalse();
     assertThat(explicitHistogram.isCompatibleWithInstrument(observableUpDownCounter)).isFalse();
     assertThat(explicitHistogram.isCompatibleWithInstrument(observableGauge)).isFalse();
+    assertThat(explicitHistogram.isCompatibleWithInstrument(gauge)).isFalse();
     assertThat(explicitHistogram.isCompatibleWithInstrument(histogram)).isTrue();
 
     AggregatorFactory exponentialHistogram =
@@ -92,6 +98,7 @@ class AggregationTest {
     assertThat(exponentialHistogram.isCompatibleWithInstrument(upDownCounter)).isFalse();
     assertThat(exponentialHistogram.isCompatibleWithInstrument(observableUpDownCounter)).isFalse();
     assertThat(exponentialHistogram.isCompatibleWithInstrument(observableGauge)).isFalse();
+    assertThat(exponentialHistogram.isCompatibleWithInstrument(gauge)).isFalse();
     assertThat(exponentialHistogram.isCompatibleWithInstrument(histogram)).isTrue();
 
     AggregatorFactory lastValue = ((AggregatorFactory) Aggregation.lastValue());
@@ -100,11 +107,12 @@ class AggregationTest {
     assertThat(lastValue.isCompatibleWithInstrument(upDownCounter)).isFalse();
     assertThat(lastValue.isCompatibleWithInstrument(observableUpDownCounter)).isFalse();
     assertThat(lastValue.isCompatibleWithInstrument(observableGauge)).isTrue();
+    assertThat(lastValue.isCompatibleWithInstrument(gauge)).isTrue();
     assertThat(lastValue.isCompatibleWithInstrument(histogram)).isFalse();
   }
 
   private static InstrumentDescriptor descriptorForType(InstrumentType instrumentType) {
     return InstrumentDescriptor.create(
-        "name", "description", "unit", instrumentType, InstrumentValueType.DOUBLE);
+        "name", "description", "unit", instrumentType, InstrumentValueType.DOUBLE, Advice.empty());
   }
 }

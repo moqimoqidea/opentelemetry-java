@@ -5,19 +5,14 @@
 
 package io.opentelemetry.sdk.resources;
 
-import static io.opentelemetry.semconv.resource.attributes.ResourceAttributes.SERVICE_NAME;
-import static io.opentelemetry.semconv.resource.attributes.ResourceAttributes.TELEMETRY_SDK_LANGUAGE;
-import static io.opentelemetry.semconv.resource.attributes.ResourceAttributes.TELEMETRY_SDK_NAME;
-import static io.opentelemetry.semconv.resource.attributes.ResourceAttributes.TELEMETRY_SDK_VERSION;
-
 import com.google.auto.value.AutoValue;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.internal.StringUtils;
 import io.opentelemetry.api.internal.Utils;
+import io.opentelemetry.sdk.common.internal.OtelVersion;
 import java.util.Objects;
-import java.util.Properties;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
@@ -30,6 +25,14 @@ import javax.annotation.concurrent.Immutable;
 @AutoValue
 public abstract class Resource {
   private static final Logger logger = Logger.getLogger(Resource.class.getName());
+
+  private static final AttributeKey<String> SERVICE_NAME = AttributeKey.stringKey("service.name");
+  private static final AttributeKey<String> TELEMETRY_SDK_LANGUAGE =
+      AttributeKey.stringKey("telemetry.sdk.language");
+  private static final AttributeKey<String> TELEMETRY_SDK_NAME =
+      AttributeKey.stringKey("telemetry.sdk.name");
+  private static final AttributeKey<String> TELEMETRY_SDK_VERSION =
+      AttributeKey.stringKey("telemetry.sdk.version");
 
   private static final int MAX_LENGTH = 255;
   private static final String ERROR_MESSAGE_INVALID_CHARS =
@@ -54,7 +57,7 @@ public abstract class Resource {
             Attributes.builder()
                 .put(TELEMETRY_SDK_NAME, "opentelemetry")
                 .put(TELEMETRY_SDK_LANGUAGE, "java")
-                .put(TELEMETRY_SDK_VERSION, readVersion())
+                .put(TELEMETRY_SDK_VERSION, OtelVersion.VERSION)
                 .build());
   }
 
@@ -107,18 +110,6 @@ public abstract class Resource {
   public static Resource create(Attributes attributes, @Nullable String schemaUrl) {
     checkAttributes(Objects.requireNonNull(attributes, "attributes"));
     return new AutoValue_Resource(schemaUrl, attributes);
-  }
-
-  private static String readVersion() {
-    Properties properties = new Properties();
-    try {
-      properties.load(
-          Resource.class.getResourceAsStream("/io/opentelemetry/sdk/common/version.properties"));
-    } catch (Exception e) {
-      // we left the attribute empty
-      return "unknown";
-    }
-    return properties.getProperty("sdk.version", "unknown");
   }
 
   /**

@@ -12,49 +12,82 @@ import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.MeterProvider;
 import java.net.InetAddress;
 import java.time.Duration;
+import java.util.StringJoiner;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import zipkin2.Span;
-import zipkin2.codec.BytesEncoder;
-import zipkin2.codec.SpanBytesEncoder;
-import zipkin2.reporter.Sender;
+import zipkin2.reporter.BytesEncoder;
+import zipkin2.reporter.BytesMessageSender;
+import zipkin2.reporter.SpanBytesEncoder;
 import zipkin2.reporter.okhttp3.OkHttpSender;
 
 /** Builder class for {@link ZipkinSpanExporter}. */
 public final class ZipkinSpanExporterBuilder {
   private BytesEncoder<Span> encoder = SpanBytesEncoder.JSON_V2;
   private Supplier<InetAddress> localIpAddressSupplier = LocalInetAddressSupplier.getInstance();
-  @Nullable private Sender sender;
+  @Nullable private BytesMessageSender sender;
   private String endpoint = ZipkinSpanExporter.DEFAULT_ENDPOINT;
   // compression is enabled by default, because this is the default of OkHttpSender,
   // which is created when no custom sender is set (see OkHttpSender.Builder)
   private boolean compressionEnabled = true;
-  private long readTimeoutMillis = TimeUnit.SECONDS.toMillis(10);
+  private int readTimeoutMillis = (int) TimeUnit.SECONDS.toMillis(10);
   private Supplier<MeterProvider> meterProviderSupplier = GlobalOpenTelemetry::getMeterProvider;
 
   /**
    * Sets the Zipkin sender. Implements the client side of the span transport. An {@link
    * OkHttpSender} is a good default.
    *
-   * <p>The {@link Sender#close()} method will be called when the exporter is shut down.
+   * <p>The {@link BytesMessageSender#close()} method will be called when the exporter is shut down.
    *
    * @param sender the Zipkin sender implementation.
    * @return this.
+   * @deprecated Use {@link #setSender(BytesMessageSender)} insteead.
    */
-  public ZipkinSpanExporterBuilder setSender(Sender sender) {
+  @Deprecated
+  public ZipkinSpanExporterBuilder setSender(zipkin2.reporter.Sender sender) {
+    return setSender((BytesMessageSender) sender);
+  }
+
+  /**
+   * Sets the Zipkin sender. Implements the client side of the span transport. An {@link
+   * OkHttpSender} is a good default.
+   *
+   * <p>The {@link BytesMessageSender#close()} method will be called when the exporter is shut down.
+   *
+   * @param sender the Zipkin sender implementation.
+   * @return this.
+   * @since 1.35.0
+   */
+  public ZipkinSpanExporterBuilder setSender(BytesMessageSender sender) {
     requireNonNull(sender, "sender");
     this.sender = sender;
     return this;
   }
 
   /**
-   * Sets the {@link BytesEncoder}, which controls the format used by the {@link Sender}. Defaults
-   * to the {@link SpanBytesEncoder#JSON_V2}.
+   * Sets the {@link zipkin2.codec.BytesEncoder}, which controls the format used by the {@link
+   * BytesMessageSender}. Defaults to the {@link zipkin2.codec.SpanBytesEncoder#JSON_V2}.
+   *
+   * @param encoder the {@code BytesEncoder} to use.
+   * @return this.
+   * @see zipkin2.codec.SpanBytesEncoder
+   * @deprecated Use {@link #setEncoder(BytesEncoder)} instead.
+   */
+  @Deprecated
+  public ZipkinSpanExporterBuilder setEncoder(zipkin2.codec.BytesEncoder<Span> encoder) {
+    requireNonNull(encoder, "encoder");
+    return setEncoder(new BytesEncoderAdapter(encoder));
+  }
+
+  /**
+   * Sets the {@link BytesEncoder}, which controls the format used by the {@link
+   * BytesMessageSender}. Defaults to the {@link SpanBytesEncoder#JSON_V2}.
    *
    * @param encoder the {@code BytesEncoder} to use.
    * @return this.
    * @see SpanBytesEncoder
+   * @since 1.35.0
    */
   public ZipkinSpanExporterBuilder setEncoder(BytesEncoder<Span> encoder) {
     requireNonNull(encoder, "encoder");
@@ -68,13 +101,14 @@ public final class ZipkinSpanExporterBuilder {
    * implementation uses a Supplier that returns a single unchanging IP address that is captured at
    * creation time.
    *
-   * @param supplier - A supplier that returns an InetAddress that may be null.
+   * @param localIpAddressSupplier - A supplier that returns an InetAddress that may be null.
    * @return this
    * @since 1.18.0
    */
-  public ZipkinSpanExporterBuilder setLocalIpAddressSupplier(Supplier<InetAddress> supplier) {
-    requireNonNull(supplier, "encoder");
-    this.localIpAddressSupplier = supplier;
+  public ZipkinSpanExporterBuilder setLocalIpAddressSupplier(
+      Supplier<InetAddress> localIpAddressSupplier) {
+    requireNonNull(localIpAddressSupplier, "localIpAddressSupplier");
+    this.localIpAddressSupplier = localIpAddressSupplier;
     return this;
   }
 
@@ -97,7 +131,7 @@ public final class ZipkinSpanExporterBuilder {
    * supported compression methods include "gzip" and "none".
    *
    * <p>The compression method is ignored when a custom Zipkin sender is set via {@link
-   * #setSender(Sender)}.
+   * #setSender(BytesMessageSender)}.
    *
    * @param compressionMethod The compression method, ex. "gzip".
    * @return this.
@@ -122,7 +156,8 @@ public final class ZipkinSpanExporterBuilder {
   public ZipkinSpanExporterBuilder setReadTimeout(long timeout, TimeUnit unit) {
     requireNonNull(unit, "unit");
     checkArgument(timeout >= 0, "timeout must be non-negative");
-    this.readTimeoutMillis = unit.toMillis(timeout);
+    long timeoutMillis = timeout == 0 ? Long.MAX_VALUE : unit.toMillis(timeout);
+    this.readTimeoutMillis = (int) Math.min(timeoutMillis, Integer.MAX_VALUE);
     return this;
   }
 
@@ -151,23 +186,38 @@ public final class ZipkinSpanExporterBuilder {
     return this;
   }
 
+  String toString(boolean includePrefixAndSuffix) {
+    StringJoiner joiner =
+        includePrefixAndSuffix
+            ? new StringJoiner(", ", "ZipkinSpanExporterBuilder{", "}")
+            : new StringJoiner(", ");
+    joiner.add("endpoint=" + endpoint);
+    joiner.add("compressionEnabled=" + compressionEnabled);
+    joiner.add("readTimeoutMillis=" + readTimeoutMillis);
+    // Note: omit sender because we can't log the configuration in any readable way
+    // Note: omit encoder because we can't log the configuration in any readable way
+    // Note: omit localIpAddressSupplier because we can't log the configuration in any readable way
+    // Note: omit meterProviderSupplier because we can't log the configuration in any readable way
+    return joiner.toString();
+  }
+
   /**
    * Builds a {@link ZipkinSpanExporter}.
    *
    * @return a {@code ZipkinSpanExporter}.
    */
   public ZipkinSpanExporter build() {
-    Sender sender = this.sender;
+    BytesMessageSender sender = this.sender;
     if (sender == null) {
       sender =
           OkHttpSender.newBuilder()
               .endpoint(endpoint)
               .compressionEnabled(compressionEnabled)
-              .readTimeout((int) readTimeoutMillis)
+              .readTimeout(readTimeoutMillis)
               .build();
     }
     OtelToZipkinSpanTransformer transformer =
         OtelToZipkinSpanTransformer.create(localIpAddressSupplier);
-    return new ZipkinSpanExporter(encoder, sender, meterProviderSupplier, transformer);
+    return new ZipkinSpanExporter(this, encoder, sender, meterProviderSupplier, transformer);
   }
 }

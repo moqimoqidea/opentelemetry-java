@@ -14,22 +14,23 @@ import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.sdk.internal.ThrottlingLogger;
 import io.opentelemetry.sdk.metrics.internal.descriptor.InstrumentDescriptor;
-import io.opentelemetry.sdk.metrics.internal.state.MeterProviderSharedState;
-import io.opentelemetry.sdk.metrics.internal.state.MeterSharedState;
 import io.opentelemetry.sdk.metrics.internal.state.WriteableMetricStorage;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-final class SdkLongCounter extends AbstractInstrument implements LongCounter {
+class SdkLongCounter extends AbstractInstrument implements LongCounter {
 
   private static final Logger logger = Logger.getLogger(SdkLongCounter.class.getName());
 
   private final ThrottlingLogger throttlingLogger = new ThrottlingLogger(logger);
-  private final WriteableMetricStorage storage;
+  final SdkMeter sdkMeter;
+  final WriteableMetricStorage storage;
 
-  private SdkLongCounter(InstrumentDescriptor descriptor, WriteableMetricStorage storage) {
+  SdkLongCounter(
+      InstrumentDescriptor descriptor, SdkMeter sdkMeter, WriteableMetricStorage storage) {
     super(descriptor);
+    this.sdkMeter = sdkMeter;
     this.storage = storage;
   }
 
@@ -56,46 +57,50 @@ final class SdkLongCounter extends AbstractInstrument implements LongCounter {
     add(increment, Attributes.empty());
   }
 
-  static final class SdkLongCounterBuilder extends AbstractInstrumentBuilder<SdkLongCounterBuilder>
-      implements LongCounterBuilder {
+  static class SdkLongCounterBuilder implements LongCounterBuilder {
 
-    SdkLongCounterBuilder(
-        MeterProviderSharedState meterProviderSharedState,
-        MeterSharedState meterSharedState,
-        String name) {
-      super(
-          meterProviderSharedState,
-          meterSharedState,
-          InstrumentType.COUNTER,
-          InstrumentValueType.LONG,
-          name,
-          "",
-          DEFAULT_UNIT);
+    final InstrumentBuilder builder;
+
+    SdkLongCounterBuilder(SdkMeter sdkMeter, String name) {
+      this.builder =
+          new InstrumentBuilder(name, InstrumentType.COUNTER, InstrumentValueType.LONG, sdkMeter);
     }
 
     @Override
-    protected SdkLongCounterBuilder getThis() {
+    public LongCounterBuilder setDescription(String description) {
+      builder.setDescription(description);
+      return this;
+    }
+
+    @Override
+    public LongCounterBuilder setUnit(String unit) {
+      builder.setUnit(unit);
       return this;
     }
 
     @Override
     public SdkLongCounter build() {
-      return buildSynchronousInstrument(SdkLongCounter::new);
+      return builder.buildSynchronousInstrument(SdkLongCounter::new);
     }
 
     @Override
     public DoubleCounterBuilder ofDoubles() {
-      return swapBuilder(SdkDoubleCounter.SdkDoubleCounterBuilder::new);
+      return builder.swapBuilder(SdkDoubleCounter.SdkDoubleCounterBuilder::new);
     }
 
     @Override
     public ObservableLongCounter buildWithCallback(Consumer<ObservableLongMeasurement> callback) {
-      return registerLongAsynchronousInstrument(InstrumentType.OBSERVABLE_COUNTER, callback);
+      return builder.buildLongAsynchronousInstrument(InstrumentType.OBSERVABLE_COUNTER, callback);
     }
 
     @Override
     public ObservableLongMeasurement buildObserver() {
-      return buildObservableMeasurement(InstrumentType.OBSERVABLE_COUNTER);
+      return builder.buildObservableMeasurement(InstrumentType.OBSERVABLE_COUNTER);
+    }
+
+    @Override
+    public String toString() {
+      return builder.toStringHelper(getClass().getSimpleName());
     }
   }
 }

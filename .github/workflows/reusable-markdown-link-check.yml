@@ -7,14 +7,13 @@ jobs:
   markdown-link-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install markdown-link-check
-        run: npm install -g markdown-link-check
-
-      - name: Run markdown-link-check
-        run: |
-          find . -type f \
-                 -name '*.md' \
-                 -not -path './CHANGELOG.md' \
-               | xargs .github/scripts/markdown-link-check-with-retry.sh
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          # excluding links to pull requests and issues is done for performance
+          args: >
+            --include-fragments
+            --exclude "^https://github.com/open-telemetry/opentelemetry-java/(issue|pull)/\\d+$"
+            --max-retries 6
+            .

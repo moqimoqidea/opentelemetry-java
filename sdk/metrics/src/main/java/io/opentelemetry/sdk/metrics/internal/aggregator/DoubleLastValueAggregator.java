@@ -7,6 +7,7 @@ package io.opentelemetry.sdk.metrics.internal.aggregator;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
 import io.opentelemetry.sdk.metrics.data.DoubleExemplarData;
 import io.opentelemetry.sdk.metrics.data.DoublePointData;
@@ -14,6 +15,7 @@ import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableDoublePointData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableGaugeData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableMetricData;
+import io.opentelemetry.sdk.metrics.internal.data.MutableDoublePointData;
 import io.opentelemetry.sdk.metrics.internal.descriptor.MetricDescriptor;
 import io.opentelemetry.sdk.metrics.internal.exemplar.ExemplarReservoir;
 import io.opentelemetry.sdk.metrics.internal.state.Measurement;
@@ -41,20 +43,27 @@ import javax.annotation.concurrent.ThreadSafe;
 public final class DoubleLastValueAggregator
     implements Aggregator<DoublePointData, DoubleExemplarData> {
   private final Supplier<ExemplarReservoir<DoubleExemplarData>> reservoirSupplier;
+  private final MemoryMode memoryMode;
 
   public DoubleLastValueAggregator(
-      Supplier<ExemplarReservoir<DoubleExemplarData>> reservoirSupplier) {
+      Supplier<ExemplarReservoir<DoubleExemplarData>> reservoirSupplier, MemoryMode memoryMode) {
     this.reservoirSupplier = reservoirSupplier;
+    this.memoryMode = memoryMode;
   }
 
   @Override
   public AggregatorHandle<DoublePointData, DoubleExemplarData> createHandle() {
-    return new Handle(reservoirSupplier.get());
+    return new Handle(reservoirSupplier.get(), memoryMode);
   }
 
   @Override
   public DoublePointData diff(DoublePointData previous, DoublePointData current) {
     return current;
+  }
+
+  @Override
+  public void diffInPlace(DoublePointData previousReusable, DoublePointData current) {
+    ((MutableDoublePointData) previousReusable).set(current);
   }
 
   @Override
@@ -64,6 +73,26 @@ public final class DoubleLastValueAggregator
         measurement.epochNanos(),
         measurement.attributes(),
         measurement.doubleValue());
+  }
+
+  @Override
+  public void toPoint(Measurement measurement, DoublePointData reusablePoint) {
+    ((MutableDoublePointData) reusablePoint)
+        .set(
+            measurement.startEpochNanos(),
+            measurement.epochNanos(),
+            measurement.attributes(),
+            measurement.doubleValue());
+  }
+
+  @Override
+  public DoublePointData createReusablePoint() {
+    return new MutableDoublePointData();
+  }
+
+  @Override
+  public void copyPoint(DoublePointData point, DoublePointData toReusablePoint) {
+    ((MutableDoublePointData) toReusablePoint).set(point);
   }
 
   @Override
@@ -88,8 +117,16 @@ public final class DoubleLastValueAggregator
     @Nullable private static final Double DEFAULT_VALUE = null;
     private final AtomicReference<Double> current = new AtomicReference<>(DEFAULT_VALUE);
 
-    private Handle(ExemplarReservoir<DoubleExemplarData> reservoir) {
+    // Only used when memoryMode is REUSABLE_DATA
+    @Nullable private final MutableDoublePointData reusablePoint;
+
+    private Handle(ExemplarReservoir<DoubleExemplarData> reservoir, MemoryMode memoryMode) {
       super(reservoir);
+      if (memoryMode == MemoryMode.REUSABLE_DATA) {
+        reusablePoint = new MutableDoublePointData();
+      } else {
+        reusablePoint = null;
+      }
     }
 
     @Override
@@ -100,8 +137,14 @@ public final class DoubleLastValueAggregator
         List<DoubleExemplarData> exemplars,
         boolean reset) {
       Double value = reset ? this.current.getAndSet(DEFAULT_VALUE) : this.current.get();
-      return ImmutableDoublePointData.create(
-          startEpochNanos, epochNanos, attributes, Objects.requireNonNull(value), exemplars);
+      if (reusablePoint != null) {
+        reusablePoint.set(
+            startEpochNanos, epochNanos, attributes, Objects.requireNonNull(value), exemplars);
+        return reusablePoint;
+      } else {
+        return ImmutableDoublePointData.create(
+            startEpochNanos, epochNanos, attributes, Objects.requireNonNull(value), exemplars);
+      }
     }
 
     @Override

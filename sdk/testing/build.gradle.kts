@@ -16,7 +16,7 @@ dependencies {
 
   annotationProcessor("com.google.auto.value:auto-value")
 
-  implementation(project(":semconv"))
+  testImplementation(project(":api:incubator"))
 
   testImplementation("junit:junit")
   testImplementation("org.junit.vintage:junit-vintage-engine")

@@ -16,42 +16,52 @@ dependencies {
   testImplementation("com.google.guava:guava")
 }
 
+dependencyCheck {
+  skipConfigurations.add("braveInOtelTestAnnotationProcessor")
+  skipConfigurations.add("grpcInOtelTestAnnotationProcessor")
+  skipConfigurations.add("otelAsBraveTestAnnotationProcessor")
+  skipConfigurations.add("otelInBraveTestAnnotationProcessor")
+  skipConfigurations.add("otelInGrpcTestAnnotationProcessor")
+  skipConfigurations.add("storageWrappersTestAnnotationProcessor")
+  skipConfigurations.add("strictContextEnabledTestAnnotationProcessor")
+}
+
 testing {
   suites {
-    val grpcInOtelTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("grpcInOtelTest") {
       dependencies {
-        implementation("io.grpc:grpc-context")
+        implementation("io.grpc:grpc-api")
       }
     }
 
-    val otelInGrpcTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("otelInGrpcTest") {
       dependencies {
-        implementation("io.grpc:grpc-context")
+        implementation("io.grpc:grpc-api")
       }
     }
 
-    val braveInOtelTest by registering(JvmTestSuite::class) {
-      dependencies {
-        implementation("io.zipkin.brave:brave")
-      }
-    }
-
-    val otelInBraveTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("braveInOtelTest") {
       dependencies {
         implementation("io.zipkin.brave:brave")
       }
     }
 
-    val otelAsBraveTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("otelInBraveTest") {
       dependencies {
         implementation("io.zipkin.brave:brave")
       }
     }
 
-    val storageWrappersTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("otelAsBraveTest") {
+      dependencies {
+        implementation("io.zipkin.brave:brave")
+      }
     }
 
-    val strictContextEnabledTest by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("storageWrappersTest") {
+    }
+
+    register<JvmTestSuite>("strictContextEnabledTest") {
       dependencies {
         implementation(project(":api:all"))
       }

@@ -8,7 +8,11 @@ package io.opentelemetry.sdk.logs;
 import io.opentelemetry.api.internal.Utils;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
 
-/** Builder for {@link LogLimits}. */
+/**
+ * Builder for {@link LogLimits}.
+ *
+ * @since 1.27.0
+ */
 public final class LogLimitsBuilder {
 
   private static final int DEFAULT_LOG_MAX_NUM_ATTRIBUTES = 128;
@@ -28,7 +32,7 @@ public final class LogLimitsBuilder {
    * @throws IllegalArgumentException if {@code maxNumberOfAttributes} is not positive.
    */
   public LogLimitsBuilder setMaxNumberOfAttributes(int maxNumberOfAttributes) {
-    Utils.checkArgument(maxNumberOfAttributes > 0, "maxNumberOfAttributes must be greater than 0");
+    Utils.checkArgument(maxNumberOfAttributes >= 0, "maxNumberOfAttributes must be non-negative");
     this.maxNumAttributes = maxNumberOfAttributes;
     return this;
   }
@@ -44,7 +48,7 @@ public final class LogLimitsBuilder {
    */
   public LogLimitsBuilder setMaxAttributeValueLength(int maxAttributeValueLength) {
     Utils.checkArgument(
-        maxAttributeValueLength > -1, "maxAttributeValueLength must be non-negative");
+        maxAttributeValueLength >= 0, "maxAttributeValueLength must be non-negative");
     this.maxAttributeValueLength = maxAttributeValueLength;
     return this;
   }

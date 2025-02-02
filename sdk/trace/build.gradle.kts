@@ -22,9 +22,8 @@ dependencies {
   api(project(":api:all"))
   api(project(":sdk:common"))
 
+  compileOnly(project(":api:incubator"))
   compileOnly(project(":sdk:trace-shaded-deps"))
-
-  implementation(project(":semconv"))
 
   annotationProcessor("com.google.auto.value:auto-value")
 
@@ -41,7 +40,6 @@ dependencies {
     // dependencies.
     isTransitive = false
   }
-  jmh(project(":exporters:jaeger-thrift"))
   jmh(project(":exporters:otlp:all")) {
     // The opentelemetry-exporter-otlp depends on this project itself. So don't pull in
     // the transitive dependencies.
@@ -51,12 +49,36 @@ dependencies {
   jmh(project(":exporters:otlp:common")) {
     isTransitive = false
   }
+  jmh(project(":exporters:common")) {
+    isTransitive = false
+  }
+  jmh(project(":exporters:sender:okhttp"))
+  jmh(project(":sdk-extensions:autoconfigure-spi")) {
+    isTransitive = false
+  }
   jmh("io.opentelemetry.proto:opentelemetry-proto")
 
   jmh("com.google.guava:guava")
   jmh("io.grpc:grpc-api")
   jmh("io.grpc:grpc-netty-shaded")
   jmh("org.testcontainers:testcontainers") // testContainer for OTLP collector
+}
+
+testing {
+  suites {
+    register<JvmTestSuite>("testIncubating") {
+      dependencies {
+        implementation(project(":sdk:testing"))
+        implementation(project(":api:incubator"))
+      }
+    }
+  }
+}
+
+tasks {
+  check {
+    dependsOn(testing.suites)
+  }
 }
 
 tasks {

@@ -10,6 +10,7 @@ import io.opentelemetry.api.trace.SpanId;
 import io.opentelemetry.api.trace.TraceId;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,10 +42,34 @@ final class ProtoSerializer extends Serializer implements AutoCloseable {
   }
 
   @Override
+  protected void writeTraceId(ProtoFieldInfo field, String traceId, MarshalerContext context)
+      throws IOException {
+    byte[] traceIdBytes = idCache.get(traceId);
+    if (traceIdBytes == null) {
+      traceIdBytes = context.getTraceIdBuffer();
+      OtelEncodingUtils.bytesFromBase16(traceId, TraceId.getLength(), traceIdBytes);
+      idCache.put(traceId, traceIdBytes);
+    }
+    writeBytes(field, traceIdBytes);
+  }
+
+  @Override
   protected void writeSpanId(ProtoFieldInfo field, String spanId) throws IOException {
     byte[] spanIdBytes =
         idCache.computeIfAbsent(
             spanId, id -> OtelEncodingUtils.bytesFromBase16(id, SpanId.getLength()));
+    writeBytes(field, spanIdBytes);
+  }
+
+  @Override
+  protected void writeSpanId(ProtoFieldInfo field, String spanId, MarshalerContext context)
+      throws IOException {
+    byte[] spanIdBytes = idCache.get(spanId);
+    if (spanIdBytes == null) {
+      spanIdBytes = context.getSpanIdBuffer();
+      OtelEncodingUtils.bytesFromBase16(spanId, SpanId.getLength(), spanIdBytes);
+      idCache.put(spanId, spanIdBytes);
+    }
     writeBytes(field, spanIdBytes);
   }
 
@@ -82,6 +107,12 @@ final class ProtoSerializer extends Serializer implements AutoCloseable {
   public void writeInt64(ProtoFieldInfo field, long value) throws IOException {
     output.writeUInt32NoTag(field.getTag());
     output.writeInt64NoTag(value);
+  }
+
+  @Override
+  public void writeUInt64(ProtoFieldInfo field, long value) throws IOException {
+    output.writeUInt32NoTag(field.getTag());
+    output.writeUInt64NoTag(value);
   }
 
   @Override
@@ -123,9 +154,32 @@ final class ProtoSerializer extends Serializer implements AutoCloseable {
   }
 
   @Override
-  protected void writeBytes(ProtoFieldInfo field, byte[] value) throws IOException {
+  public void writeString(
+      ProtoFieldInfo field, String string, int utf8Length, MarshalerContext context)
+      throws IOException {
+    output.writeUInt32NoTag(field.getTag());
+    output.writeUInt32NoTag(utf8Length);
+
+    StatelessMarshalerUtil.writeUtf8(output, string, utf8Length, context);
+  }
+
+  @Override
+  public void writeRepeatedString(ProtoFieldInfo field, byte[][] utf8Bytes) throws IOException {
+    for (byte[] value : utf8Bytes) {
+      writeString(field, value);
+    }
+  }
+
+  @Override
+  public void writeBytes(ProtoFieldInfo field, byte[] value) throws IOException {
     output.writeUInt32NoTag(field.getTag());
     output.writeByteArrayNoTag(value);
+  }
+
+  @Override
+  public void writeByteBuffer(ProtoFieldInfo field, ByteBuffer value) throws IOException {
+    output.writeUInt32NoTag(field.getTag());
+    output.writeByteBufferNoTag(value);
   }
 
   @Override
@@ -180,6 +234,42 @@ final class ProtoSerializer extends Serializer implements AutoCloseable {
   }
 
   @Override
+  public <T> void serializeRepeatedMessageWithContext(
+      ProtoFieldInfo field,
+      List<? extends T> messages,
+      StatelessMarshaler<T> marshaler,
+      MarshalerContext context)
+      throws IOException {
+    for (int i = 0; i < messages.size(); i++) {
+      T message = messages.get(i);
+      writeStartMessage(field, context.getSize());
+      marshaler.writeTo(this, message, context);
+      writeEndMessage();
+    }
+  }
+
+  @Override
+  protected void writeStartRepeated(ProtoFieldInfo field) {
+    // Do nothing
+  }
+
+  @Override
+  protected void writeEndRepeated() {
+    // Do nothing
+  }
+
+  @Override
+  protected void writeStartRepeatedElement(ProtoFieldInfo field, int protoMessageSize)
+      throws IOException {
+    writeStartMessage(field, protoMessageSize);
+  }
+
+  @Override
+  protected void writeEndRepeatedElement() {
+    writeEndMessage();
+  }
+
+  @Override
   public void writeSerializedMessage(byte[] protoSerialized, String jsonSerialized)
       throws IOException {
     output.writeRawBytes(protoSerialized);
@@ -187,8 +277,16 @@ final class ProtoSerializer extends Serializer implements AutoCloseable {
 
   @Override
   public void close() throws IOException {
-    output.flush();
-    idCache.clear();
+    try {
+      output.flush();
+      idCache.clear();
+    } catch (IOException e) {
+      // If close is called automatically as part of try-with-resources, it's possible that
+      // output.flush() will throw the same exception. Re-throwing the same exception in a finally
+      // block triggers an IllegalArgumentException indicating illegal self suppression. To avoid
+      // this, we wrap the exception so a different instance is thrown.
+      throw new IOException(e);
+    }
   }
 
   private static Map<String, byte[]> getIdCache() {

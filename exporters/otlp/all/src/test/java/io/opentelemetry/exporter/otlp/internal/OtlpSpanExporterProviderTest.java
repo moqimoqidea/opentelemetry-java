@@ -20,6 +20,7 @@ import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporterBuilder;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
 import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,6 +30,8 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import org.assertj.core.api.AbstractObjectAssert;
+import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -92,7 +95,7 @@ class OtlpSpanExporterProviderTest {
     assertThatThrownBy(
             () ->
                 provider.createExporter(
-                    DefaultConfigProperties.createForTest(
+                    DefaultConfigProperties.createFromMap(
                         Collections.singletonMap("otel.exporter.otlp.protocol", "foo"))))
         .isInstanceOf(ConfigurationException.class)
         .hasMessageContaining("Unsupported OTLP traces protocol: foo");
@@ -103,12 +106,12 @@ class OtlpSpanExporterProviderTest {
     // Verifies createExporter after resetting the spy overrides
     Mockito.reset(provider);
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(Collections.emptyMap()))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(Collections.emptyMap()))) {
       assertThat(exporter).isInstanceOf(OtlpGrpcSpanExporter.class);
     }
     try (SpanExporter exporter =
         provider.createExporter(
-            DefaultConfigProperties.createForTest(
+            DefaultConfigProperties.createFromMap(
                 Collections.singletonMap("otel.exporter.otlp.protocol", "http/protobuf")))) {
       assertThat(exporter).isInstanceOf(OtlpHttpSpanExporter.class);
     }
@@ -117,7 +120,7 @@ class OtlpSpanExporterProviderTest {
   @Test
   void createExporter_GrpcDefaults() {
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(Collections.emptyMap()))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(Collections.emptyMap()))) {
       assertThat(exporter).isInstanceOf(OtlpGrpcSpanExporter.class);
       verify(grpcBuilder, times(1)).build();
       verify(grpcBuilder, never()).setEndpoint(any());
@@ -126,9 +129,14 @@ class OtlpSpanExporterProviderTest {
       verify(grpcBuilder, never()).setTimeout(any());
       verify(grpcBuilder, never()).setTrustedCertificates(any());
       verify(grpcBuilder, never()).setClientTls(any(), any());
-      assertThat(grpcBuilder).extracting("delegate").extracting("retryPolicy").isNull();
+      assertThat(grpcBuilder).extracting("delegate").extracting("retryPolicy").isNotNull();
+      getMemoryMode(exporter).isEqualTo(MemoryMode.REUSABLE_DATA);
     }
     Mockito.verifyNoInteractions(httpBuilder);
+  }
+
+  private static AbstractObjectAssert<?, ?> getMemoryMode(SpanExporter exporter) {
+    return assertThat(exporter).extracting("marshaler").extracting("memoryMode");
   }
 
   @Test
@@ -141,10 +149,10 @@ class OtlpSpanExporterProviderTest {
     config.put("otel.exporter.otlp.headers", "header-key=header-value");
     config.put("otel.exporter.otlp.compression", "gzip");
     config.put("otel.exporter.otlp.timeout", "15s");
-    config.put("otel.experimental.exporter.otlp.retry.enabled", "true");
+    config.put("otel.java.exporter.otlp.retry.disabled", "true");
 
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(config))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(config))) {
       assertThat(exporter).isInstanceOf(OtlpGrpcSpanExporter.class);
       verify(grpcBuilder, times(1)).build();
       verify(grpcBuilder).setEndpoint("https://localhost:443/");
@@ -154,7 +162,7 @@ class OtlpSpanExporterProviderTest {
       verify(grpcBuilder).setTrustedCertificates(serverTls.certificate().getEncoded());
       verify(grpcBuilder)
           .setClientTls(clientTls.privateKey().getEncoded(), clientTls.certificate().getEncoded());
-      assertThat(grpcBuilder).extracting("delegate").extracting("retryPolicy").isNotNull();
+      assertThat(grpcBuilder).extracting("delegate").extracting("retryPolicy").isNull();
     }
     Mockito.verifyNoInteractions(httpBuilder);
   }
@@ -176,9 +184,10 @@ class OtlpSpanExporterProviderTest {
     config.put("otel.exporter.otlp.traces.compression", "gzip");
     config.put("otel.exporter.otlp.timeout", "1s");
     config.put("otel.exporter.otlp.traces.timeout", "15s");
+    config.put("otel.java.exporter.memory_mode", "immutable_data");
 
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(config))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(config))) {
       assertThat(exporter).isInstanceOf(OtlpGrpcSpanExporter.class);
       verify(grpcBuilder, times(1)).build();
       verify(grpcBuilder).setEndpoint("https://localhost:443/");
@@ -188,6 +197,7 @@ class OtlpSpanExporterProviderTest {
       verify(grpcBuilder).setTrustedCertificates(serverTls.certificate().getEncoded());
       verify(grpcBuilder)
           .setClientTls(clientTls.privateKey().getEncoded(), clientTls.certificate().getEncoded());
+      getMemoryMode(exporter).isEqualTo(MemoryMode.IMMUTABLE_DATA);
     }
     Mockito.verifyNoInteractions(httpBuilder);
   }
@@ -196,7 +206,7 @@ class OtlpSpanExporterProviderTest {
   void createExporter_HttpDefaults() {
     try (SpanExporter exporter =
         provider.createExporter(
-            DefaultConfigProperties.createForTest(
+            DefaultConfigProperties.createFromMap(
                 Collections.singletonMap("otel.exporter.otlp.traces.protocol", "http/protobuf")))) {
       assertThat(exporter).isInstanceOf(OtlpHttpSpanExporter.class);
       verify(httpBuilder, times(1)).build();
@@ -206,7 +216,8 @@ class OtlpSpanExporterProviderTest {
       verify(httpBuilder, never()).setTimeout(any());
       verify(httpBuilder, never()).setTrustedCertificates(any());
       verify(httpBuilder, never()).setClientTls(any(), any());
-      assertThat(httpBuilder).extracting("delegate").extracting("retryPolicy").isNull();
+      assertThat(httpBuilder).extracting("delegate").extracting("retryPolicy").isNotNull();
+      getMemoryMode(exporter).isEqualTo(MemoryMode.REUSABLE_DATA);
     }
     Mockito.verifyNoInteractions(grpcBuilder);
   }
@@ -219,23 +230,26 @@ class OtlpSpanExporterProviderTest {
     config.put("otel.exporter.otlp.certificate", certificatePath);
     config.put("otel.exporter.otlp.client.key", clientKeyPath);
     config.put("otel.exporter.otlp.client.certificate", clientCertificatePath);
-    config.put("otel.exporter.otlp.headers", "header-key=header-value");
+    config.put(
+        "otel.exporter.otlp.headers", "header-key1=header%20value1,header-key2=header value2");
     config.put("otel.exporter.otlp.compression", "gzip");
     config.put("otel.exporter.otlp.timeout", "15s");
-    config.put("otel.experimental.exporter.otlp.retry.enabled", "true");
+    config.put("otel.java.exporter.otlp.retry.disabled", "true");
 
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(config))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(config))) {
       assertThat(exporter).isInstanceOf(OtlpHttpSpanExporter.class);
       verify(httpBuilder, times(1)).build();
       verify(httpBuilder).setEndpoint("https://localhost:443/v1/traces");
-      verify(httpBuilder).addHeader("header-key", "header-value");
+      verify(httpBuilder).addHeader("header-key1", "header value1");
+      verify(httpBuilder).addHeader("header-key2", "header value2");
       verify(httpBuilder).setCompression("gzip");
       verify(httpBuilder).setTimeout(Duration.ofSeconds(15));
       verify(httpBuilder).setTrustedCertificates(serverTls.certificate().getEncoded());
       verify(httpBuilder)
           .setClientTls(clientTls.privateKey().getEncoded(), clientTls.certificate().getEncoded());
-      assertThat(httpBuilder).extracting("delegate").extracting("retryPolicy").isNotNull();
+      assertThat(httpBuilder).extracting("delegate").extracting("retryPolicy").isNull();
+      getMemoryMode(exporter).isEqualTo(MemoryMode.REUSABLE_DATA);
     }
     Mockito.verifyNoInteractions(grpcBuilder);
   }
@@ -259,9 +273,10 @@ class OtlpSpanExporterProviderTest {
     config.put("otel.exporter.otlp.traces.compression", "gzip");
     config.put("otel.exporter.otlp.timeout", "1s");
     config.put("otel.exporter.otlp.traces.timeout", "15s");
+    config.put("otel.java.exporter.memory_mode", "immutable_data");
 
     try (SpanExporter exporter =
-        provider.createExporter(DefaultConfigProperties.createForTest(config))) {
+        provider.createExporter(DefaultConfigProperties.createFromMap(config))) {
       assertThat(exporter).isInstanceOf(OtlpHttpSpanExporter.class);
       verify(httpBuilder, times(1)).build();
       verify(httpBuilder).setEndpoint("https://localhost:443/v1/traces");
@@ -271,7 +286,20 @@ class OtlpSpanExporterProviderTest {
       verify(httpBuilder).setTrustedCertificates(serverTls.certificate().getEncoded());
       verify(httpBuilder)
           .setClientTls(clientTls.privateKey().getEncoded(), clientTls.certificate().getEncoded());
+      getMemoryMode(exporter).isEqualTo(MemoryMode.IMMUTABLE_DATA);
     }
     Mockito.verifyNoInteractions(grpcBuilder);
+  }
+
+  @Test
+  void createExporter_decodingError() {
+    Assertions.assertThatThrownBy(
+            () -> {
+              provider.createExporter(
+                  DefaultConfigProperties.createFromMap(
+                      Collections.singletonMap("otel.exporter.otlp.headers", "header-key=%-1")));
+            })
+        .isInstanceOf(ConfigurationException.class)
+        .hasMessage("Cannot decode header value: %-1");
   }
 }

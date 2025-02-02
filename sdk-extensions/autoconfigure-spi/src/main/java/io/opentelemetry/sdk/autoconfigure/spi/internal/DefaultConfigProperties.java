@@ -9,6 +9,7 @@ import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.joining;
 
 import io.opentelemetry.api.internal.ConfigUtil;
+import io.opentelemetry.api.internal.StringUtils;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
 import java.time.Duration;
@@ -46,14 +47,15 @@ public final class DefaultConfigProperties implements ConfigProperties {
    * priority over environment variables.
    */
   public static DefaultConfigProperties create(Map<String, String> defaultProperties) {
-    return new DefaultConfigProperties(System.getProperties(), System.getenv(), defaultProperties);
+    return new DefaultConfigProperties(
+        ConfigUtil.safeSystemProperties(), System.getenv(), defaultProperties);
   }
 
   /**
    * Create a {@link DefaultConfigProperties} from the {@code properties}, ignoring system
    * properties and environment variables.
    */
-  public static DefaultConfigProperties createForTest(Map<String, String> properties) {
+  public static DefaultConfigProperties createFromMap(Map<String, String> properties) {
     return new DefaultConfigProperties(properties, Collections.emptyMap(), Collections.emptyMap());
   }
 
@@ -158,7 +160,7 @@ public final class DefaultConfigProperties implements ConfigProperties {
     try {
       long rawNumber = Long.parseLong(numberString.trim());
       TimeUnit unit = getDurationUnit(unitString.trim());
-      return Duration.ofMillis(TimeUnit.MILLISECONDS.convert(rawNumber, unit));
+      return Duration.ofNanos(TimeUnit.NANOSECONDS.convert(rawNumber, unit));
     } catch (NumberFormatException ex) {
       throw new ConfigurationException(
           "Invalid duration property "
@@ -209,16 +211,21 @@ public final class DefaultConfigProperties implements ConfigProperties {
   @Override
   public Map<String, String> getMap(String name) {
     return getList(ConfigUtil.normalizePropertyKey(name)).stream()
-        .map(keyValuePair -> filterBlanksAndNulls(keyValuePair.split("=", 2)))
         .map(
-            splitKeyValuePairs -> {
-              if (splitKeyValuePairs.size() != 2) {
+            entry -> {
+              String[] split = entry.split("=", 2);
+              if (split.length != 2 || StringUtils.isNullOrEmpty(split[0])) {
                 throw new ConfigurationException(
                     "Invalid map property: " + name + "=" + config.get(name));
               }
-              return new AbstractMap.SimpleImmutableEntry<>(
-                  splitKeyValuePairs.get(0), splitKeyValuePairs.get(1));
+              return filterBlanksAndNulls(split);
             })
+        // Filter entries with an empty value, i.e. "foo="
+        .filter(splitKeyValuePairs -> splitKeyValuePairs.size() == 2)
+        .map(
+            splitKeyValuePairs ->
+                new AbstractMap.SimpleImmutableEntry<>(
+                    splitKeyValuePairs.get(0), splitKeyValuePairs.get(1)))
         // If duplicate keys, prioritize later ones similar to duplicate system properties on a
         // Java command line.
         .collect(
@@ -250,6 +257,10 @@ public final class DefaultConfigProperties implements ConfigProperties {
   /** Returns the TimeUnit associated with a unit string. Defaults to milliseconds. */
   private static TimeUnit getDurationUnit(String unitString) {
     switch (unitString) {
+      case "us":
+        return TimeUnit.MICROSECONDS;
+      case "ns":
+        return TimeUnit.NANOSECONDS;
       case "": // Fallthrough expected
       case "ms":
         return TimeUnit.MILLISECONDS;

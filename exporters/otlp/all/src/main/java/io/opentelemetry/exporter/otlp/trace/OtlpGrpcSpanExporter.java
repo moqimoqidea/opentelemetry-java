@@ -6,18 +6,24 @@
 package io.opentelemetry.exporter.otlp.trace;
 
 import io.opentelemetry.exporter.internal.grpc.GrpcExporter;
-import io.opentelemetry.exporter.internal.otlp.traces.TraceRequestMarshaler;
+import io.opentelemetry.exporter.internal.grpc.GrpcExporterBuilder;
+import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.internal.otlp.traces.SpanReusableDataMarshaler;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.util.Collection;
+import java.util.StringJoiner;
 import javax.annotation.concurrent.ThreadSafe;
 
 /** Exports spans using OTLP via gRPC, using OpenTelemetry's protobuf model. */
 @ThreadSafe
 public final class OtlpGrpcSpanExporter implements SpanExporter {
 
-  private final GrpcExporter<TraceRequestMarshaler> delegate;
+  private final GrpcExporterBuilder<Marshaler> builder;
+  private final GrpcExporter<Marshaler> delegate;
+  private final SpanReusableDataMarshaler marshaler;
 
   /**
    * Returns a new {@link OtlpGrpcSpanExporter} using the default values.
@@ -40,8 +46,24 @@ public final class OtlpGrpcSpanExporter implements SpanExporter {
     return new OtlpGrpcSpanExporterBuilder();
   }
 
-  OtlpGrpcSpanExporter(GrpcExporter<TraceRequestMarshaler> delegate) {
+  OtlpGrpcSpanExporter(
+      GrpcExporterBuilder<Marshaler> builder,
+      GrpcExporter<Marshaler> delegate,
+      MemoryMode memoryMode) {
+    this.builder = builder;
     this.delegate = delegate;
+    this.marshaler = new SpanReusableDataMarshaler(memoryMode, delegate::export);
+  }
+
+  /**
+   * Returns a builder with configuration values equal to those for this exporter.
+   *
+   * <p>IMPORTANT: Be sure to {@link #shutdown()} this instance if it will no longer be used.
+   *
+   * @since 1.29.0
+   */
+  public OtlpGrpcSpanExporterBuilder toBuilder() {
+    return new OtlpGrpcSpanExporterBuilder(builder.copy(), marshaler.getMemoryMode());
   }
 
   /**
@@ -52,9 +74,7 @@ public final class OtlpGrpcSpanExporter implements SpanExporter {
    */
   @Override
   public CompletableResultCode export(Collection<SpanData> spans) {
-    TraceRequestMarshaler request = TraceRequestMarshaler.create(spans);
-
-    return delegate.export(request, spans.size());
+    return marshaler.export(spans);
   }
 
   /**
@@ -74,5 +94,13 @@ public final class OtlpGrpcSpanExporter implements SpanExporter {
   @Override
   public CompletableResultCode shutdown() {
     return delegate.shutdown();
+  }
+
+  @Override
+  public String toString() {
+    StringJoiner joiner = new StringJoiner(", ", "OtlpGrpcSpanExporter{", "}");
+    joiner.add(builder.toString(false));
+    joiner.add("memoryMode=" + marshaler.getMemoryMode());
+    return joiner.toString();
   }
 }

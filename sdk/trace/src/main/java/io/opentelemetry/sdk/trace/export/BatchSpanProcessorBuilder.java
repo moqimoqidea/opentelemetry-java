@@ -25,6 +25,7 @@ public final class BatchSpanProcessorBuilder {
   static final int DEFAULT_EXPORT_TIMEOUT_MILLIS = 30_000;
 
   private final SpanExporter spanExporter;
+  private boolean exportUnsampledSpans = false;
   private long scheduleDelayNanos = TimeUnit.MILLISECONDS.toNanos(DEFAULT_SCHEDULE_DELAY_MILLIS);
   private int maxQueueSize = DEFAULT_MAX_QUEUE_SIZE;
   private int maxExportBatchSize = DEFAULT_MAX_EXPORT_BATCH_SIZE;
@@ -33,6 +34,17 @@ public final class BatchSpanProcessorBuilder {
 
   BatchSpanProcessorBuilder(SpanExporter spanExporter) {
     this.spanExporter = requireNonNull(spanExporter, "spanExporter");
+  }
+
+  /**
+   * Sets whether unsampled spans should be exported. If unset, defaults to exporting only sampled
+   * spans.
+   *
+   * @since 1.34.0
+   */
+  public BatchSpanProcessorBuilder setExportUnsampledSpans(boolean exportUnsampledSpans) {
+    this.exportUnsampledSpans = exportUnsampledSpans;
+    return this;
   }
 
   /**
@@ -67,7 +79,7 @@ public final class BatchSpanProcessorBuilder {
   public BatchSpanProcessorBuilder setExporterTimeout(long timeout, TimeUnit unit) {
     requireNonNull(unit, "unit");
     checkArgument(timeout >= 0, "timeout must be non-negative");
-    exporterTimeoutNanos = unit.toNanos(timeout);
+    exporterTimeoutNanos = timeout == 0 ? Long.MAX_VALUE : unit.toNanos(timeout);
     return this;
   }
 
@@ -94,9 +106,11 @@ public final class BatchSpanProcessorBuilder {
    * @param maxQueueSize the maximum number of Spans that are kept in the queue before start
    *     dropping.
    * @return this.
+   * @throws IllegalArgumentException if {@code maxQueueSize} is not positive.
    * @see BatchSpanProcessorBuilder#DEFAULT_MAX_QUEUE_SIZE
    */
   public BatchSpanProcessorBuilder setMaxQueueSize(int maxQueueSize) {
+    checkArgument(maxQueueSize > 0, "maxQueueSize must be positive.");
     this.maxQueueSize = maxQueueSize;
     return this;
   }
@@ -146,6 +160,7 @@ public final class BatchSpanProcessorBuilder {
   public BatchSpanProcessor build() {
     return new BatchSpanProcessor(
         spanExporter,
+        exportUnsampledSpans,
         meterProvider,
         scheduleDelayNanos,
         maxQueueSize,

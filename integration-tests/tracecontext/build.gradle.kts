@@ -1,7 +1,7 @@
 plugins {
   id("otel.java-conventions")
 
-  id("com.github.johnrengelman.shadow")
+  id("com.gradleup.shadow")
 }
 
 description = "OpenTelemetry W3C Context Propagation Integration Tests"
@@ -10,6 +10,8 @@ otelJava.moduleName.set("io.opentelemetry.tracecontext.integration.tests")
 dependencies {
   implementation(project(":sdk:all"))
   implementation(project(":extensions:trace-propagators"))
+
+  compileOnly("com.google.errorprone:error_prone_annotations")
 
   implementation("com.linecorp.armeria:armeria")
 
@@ -30,4 +32,9 @@ tasks {
 
     jvmArgs("-Dio.opentelemetry.testArchive=${shadowJar.get().archiveFile.get().asFile.absolutePath}")
   }
+}
+
+// Skip OWASP dependencyCheck task on test module
+dependencyCheck {
+  skip = true
 }

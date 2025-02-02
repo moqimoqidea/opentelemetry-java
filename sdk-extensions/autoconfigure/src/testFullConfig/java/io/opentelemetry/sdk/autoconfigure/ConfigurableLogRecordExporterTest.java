@@ -9,7 +9,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.google.common.collect.ImmutableMap;
+import io.opentelemetry.exporter.otlp.internal.OtlpLogRecordExporterProvider;
 import io.opentelemetry.internal.testing.CleanupExtension;
+import io.opentelemetry.sdk.autoconfigure.internal.NamedSpiManager;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.provider.TestConfigurableLogRecordExporterProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
@@ -31,16 +34,14 @@ class ConfigurableLogRecordExporterTest {
   @Test
   void configureLogRecordExporters_spiExporter() {
     ConfigProperties config =
-        DefaultConfigProperties.createForTest(
+        DefaultConfigProperties.createFromMap(
             ImmutableMap.of("test.option", "true", "otel.logs.exporter", "testExporter"));
     List<Closeable> closeables = new ArrayList<>();
 
+    SpiHelper spiHelper = SpiHelper.create(LogRecordExporterConfiguration.class.getClassLoader());
     Map<String, LogRecordExporter> exportersByName =
         LogRecordExporterConfiguration.configureLogRecordExporters(
-            config,
-            LogRecordExporterConfiguration.class.getClassLoader(),
-            (a, unused) -> a,
-            closeables);
+            config, spiHelper, (a, unused) -> a, closeables);
     cleanup.addCloseables(closeables);
 
     assertThat(exportersByName)
@@ -53,23 +54,30 @@ class ConfigurableLogRecordExporterTest {
     assertThat(closeables)
         .hasExactlyElementsOfTypes(
             TestConfigurableLogRecordExporterProvider.TestLogRecordExporter.class);
+    assertThat(spiHelper.getListeners())
+        .satisfiesExactlyInAnyOrder(
+            listener ->
+                assertThat(listener).isInstanceOf(TestConfigurableLogRecordExporterProvider.class),
+            listener -> assertThat(listener).isInstanceOf(OtlpLogRecordExporterProvider.class));
   }
 
   @Test
   void configureLogRecordExporters_emptyClassLoader() {
     ConfigProperties config =
-        DefaultConfigProperties.createForTest(
+        DefaultConfigProperties.createFromMap(
             ImmutableMap.of("test.option", "true", "otel.logs.exporter", "testExporter"));
     List<Closeable> closeables = new ArrayList<>();
 
+    SpiHelper spiHelper = SpiHelper.create(new URLClassLoader(new URL[0], null));
     assertThatThrownBy(
             () ->
                 LogRecordExporterConfiguration.configureLogRecordExporters(
-                    config, new URLClassLoader(new URL[0], null), (a, unused) -> a, closeables))
+                    config, spiHelper, (a, unused) -> a, closeables))
         .isInstanceOf(ConfigurationException.class)
         .hasMessageContaining("testExporter");
     cleanup.addCloseables(closeables);
     assertThat(closeables).isEmpty();
+    assertThat(spiHelper.getListeners()).isEmpty();
   }
 
   @Test

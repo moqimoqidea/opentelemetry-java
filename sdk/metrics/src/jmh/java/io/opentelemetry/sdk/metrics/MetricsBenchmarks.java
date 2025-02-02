@@ -6,9 +6,12 @@
 package io.opentelemetry.sdk.metrics;
 
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.Tracer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -32,7 +35,23 @@ import org.openjdk.jmh.infra.ThreadParams;
 @Fork(1)
 public class MetricsBenchmarks {
 
-  @State(Scope.Thread)
+  private static final List<Attributes> ATTRIBUTES_LIST;
+
+  static {
+    int keys = 5;
+    int valuesPerKey = 20;
+
+    ATTRIBUTES_LIST = new ArrayList<>();
+    for (int key = 0; key < keys; key++) {
+      AttributesBuilder builder = Attributes.builder();
+      for (int value = 0; value < valuesPerKey; value++) {
+        builder.put("key_" + key, "value_" + value);
+      }
+      ATTRIBUTES_LIST.add(builder.build());
+    }
+  }
+
+  @State(Scope.Benchmark)
   public static class ThreadState {
 
     @Param TestSdk sdk;
@@ -59,9 +78,17 @@ public class MetricsBenchmarks {
     }
 
     @TearDown
-    public void tearDown(ThreadParams threadParams) {
+    public void tearDown() {
       contextScope.close();
       span.end();
+    }
+  }
+
+  @Benchmark
+  @Threads(1)
+  public void recordToMultipleAttributes(ThreadState threadState) {
+    for (Attributes attributes : ATTRIBUTES_LIST) {
+      threadState.op.perform(attributes);
     }
   }
 

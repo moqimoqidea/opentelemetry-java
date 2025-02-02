@@ -50,7 +50,10 @@ class B3PropagationIntegrationTest {
 
   private static final InMemorySpanExporter spanExporter = InMemorySpanExporter.create();
 
+  @SuppressWarnings("NonFinalStaticField")
   static WebClient b3MultiClient;
+
+  @SuppressWarnings("NonFinalStaticField")
   static WebClient b3SingleClient;
 
   private static class FrontendService implements HttpService {
@@ -72,7 +75,7 @@ class B3PropagationIntegrationTest {
               .setParent(incomingContext)
               .startSpan();
       try (Scope ignored = span.makeCurrent()) {
-        return HttpResponse.from(
+        return HttpResponse.of(
             client
                 .get()
                 .get("/backend")

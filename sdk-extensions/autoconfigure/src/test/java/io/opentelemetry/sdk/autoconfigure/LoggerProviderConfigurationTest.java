@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.google.common.collect.ImmutableMap;
 import io.opentelemetry.api.metrics.MeterProvider;
 import io.opentelemetry.internal.testing.CleanupExtension;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
 import io.opentelemetry.sdk.logs.LogLimits;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
@@ -43,9 +44,10 @@ class LoggerProviderConfigurationTest {
     SdkLoggerProviderBuilder builder = SdkLoggerProvider.builder();
     LoggerProviderConfiguration.configureLoggerProvider(
         builder,
-        DefaultConfigProperties.createForTest(properties),
-        LoggerProviderConfiguration.class.getClassLoader(),
+        DefaultConfigProperties.createFromMap(properties),
+        SpiHelper.create(LoggerProviderConfiguration.class.getClassLoader()),
         MeterProvider.noop(),
+        (a, unused) -> a,
         (a, unused) -> a,
         closeables);
     cleanup.addCloseables(closeables);
@@ -72,12 +74,12 @@ class LoggerProviderConfigurationTest {
   void configureLogLimits() {
     assertThat(
             LoggerProviderConfiguration.configureLogLimits(
-                DefaultConfigProperties.createForTest(Collections.emptyMap())))
+                DefaultConfigProperties.createFromMap(Collections.emptyMap())))
         .isEqualTo(LogLimits.getDefault());
 
     LogLimits config =
         LoggerProviderConfiguration.configureLogLimits(
-            DefaultConfigProperties.createForTest(
+            DefaultConfigProperties.createFromMap(
                 ImmutableMap.of(
                     "otel.attribute.value.length.limit", "100",
                     "otel.attribute.count.limit", "5")));

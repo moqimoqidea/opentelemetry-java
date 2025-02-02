@@ -21,6 +21,9 @@ import io.opentelemetry.api.trace.TraceFlags;
 import io.opentelemetry.api.trace.TraceId;
 import io.opentelemetry.api.trace.TraceState;
 import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.internal.marshal.MarshalerContext;
+import io.opentelemetry.exporter.internal.marshal.Serializer;
+import io.opentelemetry.exporter.internal.marshal.StatelessMarshaler;
 import io.opentelemetry.proto.common.v1.AnyValue;
 import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.common.v1.KeyValue;
@@ -28,8 +31,9 @@ import io.opentelemetry.proto.logs.v1.LogRecord;
 import io.opentelemetry.proto.logs.v1.ResourceLogs;
 import io.opentelemetry.proto.logs.v1.ScopeLogs;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.logs.data.LogRecordData;
 import io.opentelemetry.sdk.resources.Resource;
-import io.opentelemetry.sdk.testing.logs.TestLogRecordData;
+import io.opentelemetry.sdk.testing.logs.internal.TestExtendedLogRecordData;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -39,6 +43,8 @@ import java.util.Collections;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class LogsRequestMarshalerTest {
   private static final byte[] TRACE_ID_BYTES =
@@ -46,6 +52,7 @@ class LogsRequestMarshalerTest {
   private static final String TRACE_ID = TraceId.fromBytes(TRACE_ID_BYTES);
   private static final byte[] SPAN_ID_BYTES = new byte[] {0, 0, 0, 0, 4, 3, 2, 1};
   private static final String SPAN_ID = SpanId.fromBytes(SPAN_ID_BYTES);
+  private static final String EVENT_NAME = "hello";
   private static final String BODY = "Hello world from this log...";
 
   @Test
@@ -53,7 +60,7 @@ class LogsRequestMarshalerTest {
     ResourceLogsMarshaler[] resourceLogsMarshalers =
         ResourceLogsMarshaler.create(
             Collections.singleton(
-                TestLogRecordData.builder()
+                TestExtendedLogRecordData.builder()
                     .setResource(
                         Resource.builder().put("one", 1).setSchemaUrl("http://url").build())
                     .setInstrumentationScopeInfo(
@@ -62,6 +69,7 @@ class LogsRequestMarshalerTest {
                             .setSchemaUrl("http://url")
                             .setAttributes(Attributes.builder().put("key", "value").build())
                             .build())
+                    .setEventName(EVENT_NAME)
                     .setBody(BODY)
                     .setSeverity(Severity.INFO)
                     .setSeverityText("INFO")
@@ -70,7 +78,8 @@ class LogsRequestMarshalerTest {
                             TRACE_ID, SPAN_ID, TraceFlags.getDefault(), TraceState.getDefault()))
                     .setAttributes(Attributes.of(AttributeKey.booleanKey("key"), true))
                     .setTotalAttributeCount(2)
-                    .setEpoch(12345, TimeUnit.NANOSECONDS)
+                    .setTimestamp(12345, TimeUnit.NANOSECONDS)
+                    .setObservedTimestamp(6789, TimeUnit.NANOSECONDS)
                     .build()));
 
     assertThat(resourceLogsMarshalers).hasSize(1);
@@ -94,17 +103,19 @@ class LogsRequestMarshalerTest {
                 .build());
   }
 
-  @Test
-  void toProtoLogRecord() {
+  @ParameterizedTest
+  @EnumSource(MarshalerSource.class)
+  void toProtoLogRecord(MarshalerSource marshalerSource) {
     LogRecord logRecord =
         parse(
             LogRecord.getDefaultInstance(),
-            LogMarshaler.create(
-                TestLogRecordData.builder()
+            marshalerSource.create(
+                TestExtendedLogRecordData.builder()
                     .setResource(
                         Resource.create(Attributes.builder().put("testKey", "testValue").build()))
                     .setInstrumentationScopeInfo(
                         InstrumentationScopeInfo.builder("instrumentation").setVersion("1").build())
+                    .setEventName(EVENT_NAME)
                     .setBody(BODY)
                     .setSeverity(Severity.INFO)
                     .setSeverityText("INFO")
@@ -113,12 +124,14 @@ class LogsRequestMarshalerTest {
                             TRACE_ID, SPAN_ID, TraceFlags.getDefault(), TraceState.getDefault()))
                     .setAttributes(Attributes.of(AttributeKey.booleanKey("key"), true))
                     .setTotalAttributeCount(2)
-                    .setEpoch(12345, TimeUnit.NANOSECONDS)
+                    .setTimestamp(12345, TimeUnit.NANOSECONDS)
+                    .setObservedTimestamp(6789, TimeUnit.NANOSECONDS)
                     .build()));
 
     assertThat(logRecord.getTraceId().toByteArray()).isEqualTo(TRACE_ID_BYTES);
     assertThat(logRecord.getSpanId().toByteArray()).isEqualTo(SPAN_ID_BYTES);
     assertThat(logRecord.getSeverityText()).isEqualTo("INFO");
+    assertThat(logRecord.getEventName()).isEqualTo(EVENT_NAME);
     assertThat(logRecord.getBody()).isEqualTo(AnyValue.newBuilder().setStringValue(BODY).build());
     assertThat(logRecord.getAttributesList())
         .containsExactly(
@@ -128,20 +141,23 @@ class LogsRequestMarshalerTest {
                 .build());
     assertThat(logRecord.getDroppedAttributesCount()).isEqualTo(1);
     assertThat(logRecord.getTimeUnixNano()).isEqualTo(12345);
+    assertThat(logRecord.getObservedTimeUnixNano()).isEqualTo(6789);
   }
 
-  @Test
-  void toProtoLogRecord_MinimalFields() {
+  @ParameterizedTest
+  @EnumSource(MarshalerSource.class)
+  void toProtoLogRecord_MinimalFields(MarshalerSource marshalerSource) {
     LogRecord logRecord =
         parse(
             LogRecord.getDefaultInstance(),
-            LogMarshaler.create(
-                TestLogRecordData.builder()
+            marshalerSource.create(
+                TestExtendedLogRecordData.builder()
                     .setResource(
                         Resource.create(Attributes.builder().put("testKey", "testValue").build()))
                     .setInstrumentationScopeInfo(
                         InstrumentationScopeInfo.builder("instrumentation").setVersion("1").build())
-                    .setEpoch(12345, TimeUnit.NANOSECONDS)
+                    .setTimestamp(12345, TimeUnit.NANOSECONDS)
+                    .setObservedTimestamp(6789, TimeUnit.NANOSECONDS)
                     .build()));
 
     assertThat(logRecord.getTraceId()).isEmpty();
@@ -149,10 +165,11 @@ class LogsRequestMarshalerTest {
     assertThat(logRecord.getSeverityText()).isBlank();
     assertThat(logRecord.getSeverityNumber().getNumber())
         .isEqualTo(Severity.UNDEFINED_SEVERITY_NUMBER.getSeverityNumber());
-    assertThat(logRecord.getBody()).isEqualTo(AnyValue.newBuilder().setStringValue("").build());
+    assertThat(logRecord.getBody()).isEqualTo(AnyValue.newBuilder().build());
     assertThat(logRecord.getAttributesList()).isEmpty();
     assertThat(logRecord.getDroppedAttributesCount()).isZero();
     assertThat(logRecord.getTimeUnixNano()).isEqualTo(12345);
+    assertThat(logRecord.getObservedTimeUnixNano()).isEqualTo(6789);
   }
 
   @SuppressWarnings("unchecked")
@@ -233,5 +250,40 @@ class LogsRequestMarshalerTest {
       throw new UncheckedIOException(e);
     }
     return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+  }
+
+  private static <T> Marshaler createMarshaler(StatelessMarshaler<T> marshaler, T data) {
+    return new Marshaler() {
+      private final MarshalerContext context = new MarshalerContext();
+      private final int size = marshaler.getBinarySerializedSize(data, context);
+
+      @Override
+      public int getBinarySerializedSize() {
+        return size;
+      }
+
+      @Override
+      protected void writeTo(Serializer output) throws IOException {
+        context.resetReadIndex();
+        marshaler.writeTo(output, data, context);
+      }
+    };
+  }
+
+  private enum MarshalerSource {
+    MARSHALER {
+      @Override
+      Marshaler create(LogRecordData logData) {
+        return LogMarshaler.create(logData);
+      }
+    },
+    LOW_ALLOCATION_MARSHALER {
+      @Override
+      Marshaler create(LogRecordData logData) {
+        return createMarshaler(LogStatelessMarshaler.INSTANCE, logData);
+      }
+    };
+
+    abstract Marshaler create(LogRecordData logData);
   }
 }

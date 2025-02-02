@@ -16,6 +16,7 @@ import io.opentelemetry.api.metrics.DoubleCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.internal.testing.slf4j.SuppressLogger;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.metrics.internal.state.DefaultSynchronousMetricStorage;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import io.opentelemetry.sdk.testing.time.TestClock;
@@ -167,13 +168,19 @@ class SdkDoubleCounterTest {
   }
 
   @Test
+  @SuppressLogger(DefaultSynchronousMetricStorage.class)
+  void doubleCounterAdd_NaN() {
+    DoubleCounter doubleCounter = sdkMeter.counterBuilder("testCounter").ofDoubles().build();
+    doubleCounter.add(Double.NaN);
+    assertThat(sdkMeterReader.collectAllMetrics()).hasSize(0);
+  }
+
+  @Test
   void stressTest() {
     DoubleCounter doubleCounter = sdkMeter.counterBuilder("testCounter").ofDoubles().build();
 
     StressTestRunner.Builder stressTestBuilder =
-        StressTestRunner.builder()
-            .setInstrument((SdkDoubleCounter) doubleCounter)
-            .setCollectionIntervalMs(100);
+        StressTestRunner.builder().setCollectionIntervalMs(100);
 
     for (int i = 0; i < 4; i++) {
       stressTestBuilder.addOperation(
@@ -209,9 +216,7 @@ class SdkDoubleCounterTest {
     DoubleCounter doubleCounter = sdkMeter.counterBuilder("testCounter").ofDoubles().build();
 
     StressTestRunner.Builder stressTestBuilder =
-        StressTestRunner.builder()
-            .setInstrument((SdkDoubleCounter) doubleCounter)
-            .setCollectionIntervalMs(100);
+        StressTestRunner.builder().setCollectionIntervalMs(100);
 
     IntStream.range(0, 4)
         .forEach(

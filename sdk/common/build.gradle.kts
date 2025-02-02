@@ -1,9 +1,11 @@
+import io.opentelemetry.gradle.OtelVersionClassPlugin
+
 plugins {
   id("otel.java-conventions")
   id("otel.publish-conventions")
-
   id("otel.animalsniffer-conventions")
 }
+apply<OtelVersionClassPlugin>()
 
 description = "OpenTelemetry SDK Common"
 otelJava.moduleName.set("io.opentelemetry.sdk.common")
@@ -13,21 +15,12 @@ val mrJarVersions = listOf(9)
 dependencies {
   api(project(":api:all"))
 
-  implementation(project(":semconv"))
-
   annotationProcessor("com.google.auto.value:auto-value")
 
   testAnnotationProcessor("com.google.auto.value:auto-value")
 
   testImplementation(project(":sdk:testing"))
   testImplementation("com.google.guava:guava-testlib")
-}
-
-testing {
-  suites {
-    val testResourceDisabledByProperty by registering(JvmTestSuite::class)
-    val testResourceDisabledByEnv by registering(JvmTestSuite::class)
-  }
 }
 
 for (version in mrJarVersions) {
@@ -61,9 +54,17 @@ for (version in mrJarVersions) {
 
 tasks {
   withType(Jar::class) {
+    val sourcePathProvider = if (name.equals("jar")) {
+      { ss: SourceSet? -> ss?.output }
+    } else if (name.equals("sourcesJar")) {
+      { ss: SourceSet? -> ss?.java }
+    } else {
+      { _: SourceSet -> project.objects.fileCollection() }
+    }
+
     for (version in mrJarVersions) {
       into("META-INF/versions/$version") {
-        from(sourceSets["java$version"].output)
+        from(sourcePathProvider(sourceSets["java$version"]))
       }
     }
     manifest.attributes(

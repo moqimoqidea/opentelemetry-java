@@ -11,6 +11,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.google.common.collect.ImmutableMap;
 import io.opentelemetry.internal.testing.CleanupExtension;
+import io.opentelemetry.sdk.autoconfigure.internal.NamedSpiManager;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
 import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
@@ -25,12 +27,14 @@ class LogRecordExporterConfigurationTest {
 
   @RegisterExtension CleanupExtension cleanup = new CleanupExtension();
 
+  private final SpiHelper spiHelper =
+      SpiHelper.create(LogRecordExporterConfigurationTest.class.getClassLoader());
+
   @Test
   void configureExporter_KnownSpiExportersNotOnClasspath() {
     NamedSpiManager<LogRecordExporter> spiExportersManager =
         LogRecordExporterConfiguration.logRecordExporterSpiManager(
-            DefaultConfigProperties.createForTest(Collections.emptyMap()),
-            LogRecordExporterConfigurationTest.class.getClassLoader());
+            DefaultConfigProperties.createFromMap(Collections.emptyMap()), spiHelper);
 
     assertThatThrownBy(() -> configureExporter("logging", spiExportersManager))
         .isInstanceOf(ConfigurationException.class)
@@ -42,10 +46,15 @@ class LogRecordExporterConfigurationTest {
         .hasMessage(
             "otel.logs.exporter set to \"logging-otlp\" but opentelemetry-exporter-logging-otlp"
                 + " not found on classpath. Make sure to add it as a dependency.");
+    assertThatThrownBy(() -> configureExporter("experimental-otlp/stdout", spiExportersManager))
+        .isInstanceOf(ConfigurationException.class)
+        .hasMessage(
+            "otel.logs.exporter set to \"experimental-otlp/stdout\" but opentelemetry-exporter-logging-otlp"
+                + " not found on classpath. Make sure to add it as a dependency.");
     assertThatThrownBy(() -> configureExporter("otlp", spiExportersManager))
         .isInstanceOf(ConfigurationException.class)
         .hasMessage(
-            "otel.logs.exporter set to \"otlp\" but opentelemetry-exporter-otlp-logs"
+            "otel.logs.exporter set to \"otlp\" but opentelemetry-exporter-otlp"
                 + " not found on classpath. Make sure to add it as a dependency.");
 
     // Unrecognized exporter
@@ -60,9 +69,9 @@ class LogRecordExporterConfigurationTest {
     assertThatThrownBy(
             () ->
                 LogRecordExporterConfiguration.configureLogRecordExporters(
-                    DefaultConfigProperties.createForTest(
+                    DefaultConfigProperties.createFromMap(
                         ImmutableMap.of("otel.logs.exporter", "otlp,otlp")),
-                    LogRecordExporterConfiguration.class.getClassLoader(),
+                    spiHelper,
                     (a, unused) -> a,
                     closeables))
         .isInstanceOf(ConfigurationException.class)
@@ -78,9 +87,9 @@ class LogRecordExporterConfigurationTest {
     assertThatThrownBy(
             () ->
                 LogRecordExporterConfiguration.configureLogRecordExporters(
-                    DefaultConfigProperties.createForTest(
+                    DefaultConfigProperties.createFromMap(
                         ImmutableMap.of("otel.logs.exporter", "foo")),
-                    LogRecordExporterConfiguration.class.getClassLoader(),
+                    spiHelper,
                     (a, unused) -> a,
                     new ArrayList<>()))
         .isInstanceOf(ConfigurationException.class)
@@ -96,9 +105,9 @@ class LogRecordExporterConfigurationTest {
     assertThatThrownBy(
             () ->
                 LogRecordExporterConfiguration.configureLogRecordExporters(
-                    DefaultConfigProperties.createForTest(
+                    DefaultConfigProperties.createFromMap(
                         ImmutableMap.of("otel.logs.exporter", "otlp,none")),
-                    LogRecordExporterConfiguration.class.getClassLoader(),
+                    spiHelper,
                     (a, unused) -> a,
                     closeables))
         .isInstanceOf(ConfigurationException.class)

@@ -164,9 +164,7 @@ class SdkDoubleUpDownCounterTest {
         sdkMeter.upDownCounterBuilder("testUpDownCounter").ofDoubles().build();
 
     StressTestRunner.Builder stressTestBuilder =
-        StressTestRunner.builder()
-            .setInstrument((SdkDoubleUpDownCounter) doubleUpDownCounter)
-            .setCollectionIntervalMs(100);
+        StressTestRunner.builder().setCollectionIntervalMs(100);
 
     for (int i = 0; i < 4; i++) {
       stressTestBuilder.addOperation(
@@ -205,9 +203,7 @@ class SdkDoubleUpDownCounterTest {
         sdkMeter.upDownCounterBuilder("testUpDownCounter").ofDoubles().build();
 
     StressTestRunner.Builder stressTestBuilder =
-        StressTestRunner.builder()
-            .setInstrument((SdkDoubleUpDownCounter) doubleUpDownCounter)
-            .setCollectionIntervalMs(100);
+        StressTestRunner.builder().setCollectionIntervalMs(100);
 
     IntStream.range(0, 4)
         .forEach(
@@ -257,5 +253,19 @@ class SdkDoubleUpDownCounterTest {
                                             .hasEpochNanos(testClock.now())
                                             .hasValue(20_000)
                                             .hasAttributes(attributeEntry(keys[3], values[3])))));
+  }
+
+  @Test
+  void testToString() {
+    String expected =
+        "SdkDoubleUpDownCounter{descriptor=InstrumentDescriptor{name=testUpDownCounter, description=description, unit=ms, type=UP_DOWN_COUNTER, valueType=DOUBLE, advice=Advice{explicitBucketBoundaries=null, attributes=null}}}";
+    DoubleUpDownCounter counter =
+        sdkMeter
+            .upDownCounterBuilder("testUpDownCounter")
+            .ofDoubles()
+            .setDescription("description")
+            .setUnit("ms")
+            .build();
+    assertThat(counter).hasToString(expected);
   }
 }

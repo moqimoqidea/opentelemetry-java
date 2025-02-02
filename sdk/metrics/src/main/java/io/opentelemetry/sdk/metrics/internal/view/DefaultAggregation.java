@@ -5,6 +5,7 @@
 
 package io.opentelemetry.sdk.metrics.internal.view;
 
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.internal.ThrottlingLogger;
 import io.opentelemetry.sdk.metrics.Aggregation;
 import io.opentelemetry.sdk.metrics.data.ExemplarData;
@@ -35,7 +36,7 @@ public final class DefaultAggregation implements Aggregation, AggregatorFactory 
 
   private DefaultAggregation() {}
 
-  private static Aggregation resolve(InstrumentDescriptor instrument) {
+  private static Aggregation resolve(InstrumentDescriptor instrument, boolean withAdvice) {
     switch (instrument.getType()) {
       case COUNTER:
       case UP_DOWN_COUNTER:
@@ -43,8 +44,13 @@ public final class DefaultAggregation implements Aggregation, AggregatorFactory 
       case OBSERVABLE_UP_DOWN_COUNTER:
         return SumAggregation.getInstance();
       case HISTOGRAM:
+        if (withAdvice && instrument.getAdvice().getExplicitBucketBoundaries() != null) {
+          return ExplicitBucketHistogramAggregation.create(
+              instrument.getAdvice().getExplicitBucketBoundaries());
+        }
         return ExplicitBucketHistogramAggregation.getDefault();
       case OBSERVABLE_GAUGE:
+      case GAUGE:
         return LastValueAggregation.getInstance();
     }
     logger.log(Level.WARNING, "Unable to find default aggregation for instrument: " + instrument);
@@ -53,15 +59,17 @@ public final class DefaultAggregation implements Aggregation, AggregatorFactory 
 
   @Override
   public <T extends PointData, U extends ExemplarData> Aggregator<T, U> createAggregator(
-      InstrumentDescriptor instrumentDescriptor, ExemplarFilter exemplarFilter) {
-    return ((AggregatorFactory) resolve(instrumentDescriptor))
-        .createAggregator(instrumentDescriptor, exemplarFilter);
+      InstrumentDescriptor instrumentDescriptor,
+      ExemplarFilter exemplarFilter,
+      MemoryMode memoryMode) {
+    return ((AggregatorFactory) resolve(instrumentDescriptor, /* withAdvice= */ true))
+        .createAggregator(instrumentDescriptor, exemplarFilter, memoryMode);
   }
 
   @Override
   public boolean isCompatibleWithInstrument(InstrumentDescriptor instrumentDescriptor) {
     // This should always return true
-    return ((AggregatorFactory) resolve(instrumentDescriptor))
+    return ((AggregatorFactory) resolve(instrumentDescriptor, /* withAdvice= */ false))
         .isCompatibleWithInstrument(instrumentDescriptor);
   }
 

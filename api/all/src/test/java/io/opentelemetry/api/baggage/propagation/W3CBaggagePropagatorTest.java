@@ -8,14 +8,18 @@ package io.opentelemetry.api.baggage.propagation;
 import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.opentelemetry.api.baggage.Baggage;
 import io.opentelemetry.api.baggage.BaggageEntryMetadata;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
+import io.opentelemetry.context.propagation.internal.ExtendedTextMapGetter;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.junit.jupiter.api.Test;
@@ -33,6 +37,28 @@ class W3CBaggagePropagatorTest {
         @Override
         public String get(Map<String, String> carrier, String key) {
           return carrier.get(key);
+        }
+      };
+
+  private static final ExtendedTextMapGetter<Map<String, List<String>>> multiGetter =
+      new ExtendedTextMapGetter<Map<String, List<String>>>() {
+        @Override
+        public Iterable<String> keys(Map<String, List<String>> carrier) {
+          return carrier.keySet();
+        }
+
+        @Nullable
+        @Override
+        public String get(Map<String, List<String>> carrier, String key) {
+          return carrier.getOrDefault(key, Collections.emptyList()).stream()
+              .findFirst()
+              .orElse(null);
+        }
+
+        @Override
+        public Iterator<String> getAll(Map<String, List<String>> carrier, String key) {
+          List<String> values = carrier.get(key);
+          return values == null ? Collections.emptyIterator() : values.iterator();
         }
       };
 
@@ -422,6 +448,101 @@ class W3CBaggagePropagatorTest {
   }
 
   @Test
+  void extract_multiple_headers() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(),
+            ImmutableMap.of("baggage", ImmutableList.of("k1=v1", "k2=v2")),
+            multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().put("k1", "v1").put("k2", "v2").build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_duplicate_key() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(),
+            ImmutableMap.of("baggage", ImmutableList.of("k1=v1", "k1=v2")),
+            multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().put("k1", "v2").build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_mixed_duplicates_non_duplicates() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(),
+            ImmutableMap.of("baggage", ImmutableList.of("k1=v1,k2=v0", "k2=v2,k3=v3")),
+            multiGetter);
+
+    Baggage expectedBaggage =
+        Baggage.builder().put("k1", "v1").put("k2", "v2").put("k3", "v3").build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_all_empty() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(), ImmutableMap.of("baggage", ImmutableList.of("", "")), multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_some_empty() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(), ImmutableMap.of("baggage", ImmutableList.of("", "k=v")), multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().put("k", "v").build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_all_invalid() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(),
+            ImmutableMap.of("baggage", ImmutableList.of("!@#$%^", "key=va%lue")),
+            multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
+  void extract_multiple_headers_some_invalid() {
+    W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
+
+    Context result =
+        propagator.extract(
+            Context.root(),
+            ImmutableMap.of("baggage", ImmutableList.of("k1=v1", "key=va%lue", "k2=v2")),
+            multiGetter);
+
+    Baggage expectedBaggage = Baggage.builder().put("k1", "v1").put("k2", "v2").build();
+    assertThat(Baggage.fromContext(result)).isEqualTo(expectedBaggage);
+  }
+
+  @Test
   void inject_noBaggage() {
     W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
     Map<String, String> carrier = new HashMap<>();
@@ -448,6 +569,7 @@ class W3CBaggagePropagatorTest {
             .put("\2ab\3cd", "wacky key nonprintable")
             .put(null, "null key")
             .put("nullvalue", null)
+            .put(" ", "key is only space")
             .build();
     W3CBaggagePropagator propagator = W3CBaggagePropagator.getInstance();
     Map<String, String> carrier = new HashMap<>();

@@ -1,8 +1,35 @@
 # OpenTelemetry Incubator
 
-[![Javadocs][javadoc-image]][javadoc-url]
-
 This artifact contains experimental code related to the trace and metric SDKs.
+
+## Declarative Configuration
+
+The [declarative configuration interface](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/README.md#declarative-configuration) allows for YAML based file configuration of `OpenTelemetrySdk`.
+
+Usage:
+
+```shell
+File yamlConfigFile = new File("/path/to/config.yaml");
+OpenTelemetrySdk openTelemetrySdk;
+try (FileInputStream yamlConfigFileInputStream = new FileInputStream("/path/to/config.yaml")) {
+  openTelemetrySdk = FileConfiguration.parseAndCreate(yamlConfigFileInputStream);
+}
+// ...proceed with application after successful initialization of OpenTelemetrySdk
+```
+
+Notes:
+* Environment variable substitution is supported as [defined in the spec](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/data-model.md#environment-variable-substitution)
+* Currently, there is no support for the customization (i.e. `AutoConfigurationCustomizerProvider`) SPIs defined in [opentelemetry-sdk-extension-autoconfigure-spi](../autoconfigure-spi).
+* Custom SDK extension components which reference the [ComponentProvider](https://github.com/open-telemetry/opentelemetry-java/blob/main/sdk-extensions/autoconfigure-spi/src/main/java/io/opentelemetry/sdk/autoconfigure/spi/internal/ComponentProvider.java) SPI can be referenced in declarative configuration. Supported types include:
+  * `Resource`
+  * `SpanExporter`
+  * `MetricExporter`
+  * `LogRecordExporter`
+  * `SpanProcessor`
+  * `LogRecordProcessor`
+  * `TextMapPropagator`
+  * `Sampler`
+* You can use declarative configuration with [autoconfigure](https://opentelemetry.io/docs/languages/java/configuration/#declarative-configuration) to specify a configuration file via environment variable, e.g. `OTEL_EXPERIMENTAL_CONFIG_FILE=/path/to/config.yaml`.
 
 ## View File Configuration
 
@@ -14,6 +41,7 @@ For example, suppose `/Users/user123/view.yaml` has the following content:
 - selector:
     instrument_name: my-instrument
     instrument_type: COUNTER
+    instrument_unit: ms
     meter_name: my-meter
     meter_version: 1.0.0
     meter_schema_url: http://example.com
@@ -36,6 +64,7 @@ SdkMeterProvider.builder()
        InstrumentSelector.builder()
            .setName("my-instrument")
            .setType(InstrumentType.COUNTER)
+           .setUnit("ms")
            .setMeterName("my-meter")
            .setMeterVersion("1.0.0")
            .setMeterSchemaUrl("http://example.com")
@@ -94,101 +123,3 @@ Additional notes on usage:
 [`drop`]: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#drop-aggregation
 [`explicit_bucket_histogram`]: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#explicit-bucket-histogram-aggregation
 [`exponential_bucket_histogram`]: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#exponential-bucket-histogram-aggregation
-
-## zPages
-
-OpenTelemetry Java zPages are a collection of dynamic HTML web pages embedded in your app that
-display stats and trace data. Learn more
-in [this blog post](https://medium.com/opentelemetry/zpages-in-opentelemetry-2b080a81eb47).
-
-### Register the zPages
-
-**Note:** The package `com.sun.net.httpserver` is required to use the default zPages setup. Please
-make sure your
-version of the JDK includes this package.
-
-To setup the zPages, register zPages with your `OpenTelemetrySdk` and
-call `startHttpServerAndRegisterAllPages(int port)` on your ZPageServer instance:
-
-```java
-public class MyMainClass {
-  public static void main(String[] args) throws Exception {
-    // Create a new ZPageServer
-    ZPageServer zpageServer = ZPageServer.create();
-    // Configure OpenTelemetrySdk with zPages
-    OpenTelemetry openTelemetry =
-        OpenTelemetrySdk.builder().setTracerProvider(zpageServer.buildSdkTracerProvider()).build();
-
-    // Start zPages server
-    zpageServer.startHttpServerAndRegisterAllPages(8080);
-    // ...Do work (this is just an example)
-    long count = 0;
-    while (true) {
-      Tracer tracer = openTelemetry.getTracer("demo");
-      Span span = tracer.spanBuilder("exampleSpan" + ++count).startSpan();
-      try (Scope scope = span.makeCurrent()) {
-        System.out.println("Inside a span...");
-        TimeUnit.SECONDS.sleep(2);
-      }
-      span.end();
-    }
-  }
-}
-```
-
-Note that `startHttpServerAndRegisterAllPages()` will create a new `HttpServer` and register the zPages
-with it. If you already have an existing or shared `HttpServer`, you can instead call
-`registerAllPagesToHttpServer(HttpServer server)`:
-
-```java
-public class MyMainClass {
-  public static void main(String[] args) throws Exception {
-    // ...configure OpenTelemetrySdk with zPages
-
-    // Start zPages server
-    HttpServer server = HttpServer.create(new InetSocketAddress(8000), 10);
-    zPageServer.registerAllPagesToHttpServer(server);
-    server.start();
-    // ... do work
-  }
-}
-```
-
-### Access the zPages
-
-#### View all available zPages on the `/` index page
-
-The index page `/` lists all available zPages with a link and description.
-
-#### View trace spans on the `/tracez` zPage
-
-The /tracez zPage displays information on running spans, sample span latencies, and sample error
-spans. The data is aggregated into a summary-level table:
-
-![tracez-table](img/tracez-table.png)
-
-You can click on each of the counts in the table cells to access the corresponding span
-details. For example, here are the details of the `ChildSpan` latency sample (row 1, col 4):
-
-![tracez-details](img/tracez-details.png)
-
-#### View and update the tracing configuration on the `/traceconfigz` zPage
-
-The /traceconfigz zPage displays information about the currently active tracing configuration and
-provides an interface for users to modify relevant parameters. Here is what the web page looks like:
-
-![traceconfigz](img/traceconfigz.png)
-
-### Benchmark Testing
-
-This module contains two sets of benchmark tests: one for adding spans to an instance of
-TracezSpanBuckets and another for retrieving counts and spans with TracezDataAggregator. You can run
-the tests yourself with the following commands:
-
-```
-./gradlew -PjmhIncludeSingleClass=TracezSpanBucketsBenchmark clean :opentelemetry-sdk-extension-zpages:jmh
-./gradlew -PjmhIncludeSingleClass=TracezDataAggregatorBenchmark clean :opentelemetry-sdk-extension-zpages:jmh
-```
-
-[javadoc-image]: https://www.javadoc.io/badge/io.opentelemetry/opentelemetry-sdk-extension-tracing-incubator.svg
-[javadoc-url]: https://www.javadoc.io/doc/io.opentelemetry/opentelemetry-sdk-extension-tracing-incubator

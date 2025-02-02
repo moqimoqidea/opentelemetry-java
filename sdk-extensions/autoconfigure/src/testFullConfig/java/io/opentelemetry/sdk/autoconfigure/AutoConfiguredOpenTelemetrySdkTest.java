@@ -5,13 +5,15 @@
 
 package io.opentelemetry.sdk.autoconfigure;
 
+import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
+import com.linecorp.armeria.client.WebClient;
 import io.github.netmikey.logunit.api.LogCapturer;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
-import io.opentelemetry.api.events.GlobalEventEmitterProvider;
-import io.opentelemetry.api.logs.GlobalLoggerProvider;
+import io.opentelemetry.exporter.prometheus.PrometheusHttpServer;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import java.lang.reflect.Field;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,8 +31,25 @@ class AutoConfiguredOpenTelemetrySdkTest {
   @BeforeEach
   void setUp() {
     GlobalOpenTelemetry.resetForTest();
-    GlobalLoggerProvider.resetForTest();
-    GlobalEventEmitterProvider.resetForTest();
+  }
+
+  @SuppressWarnings("ResultOfMethodCallIgnored")
+  @Test
+  void build_addMetricReaderCustomizerPrometheus() {
+    AutoConfiguredOpenTelemetrySdkBuilder builder = AutoConfiguredOpenTelemetrySdk.builder();
+    builder.addPropertiesSupplier(() -> singletonMap("otel.metrics.exporter", "prometheus"));
+
+    int port = FreePortFinder.getFreePort();
+    builder.addMetricReaderCustomizer(
+        (reader, config) -> {
+          assertThat(reader).isInstanceOf(PrometheusHttpServer.class);
+          return PrometheusHttpServer.builder().setPort(port).build();
+        });
+
+    try (OpenTelemetrySdk ignored = builder.build().getOpenTelemetrySdk()) {
+      WebClient client = WebClient.builder("http://localhost:" + port).build();
+      assertThatCode(() -> client.get("/metrics")).doesNotThrowAnyException();
+    }
   }
 
   @Test
@@ -46,10 +65,7 @@ class AutoConfiguredOpenTelemetrySdkTest {
   @Test
   void initializeAndGet_noGlobal() {
     try (OpenTelemetrySdk sdk =
-        AutoConfiguredOpenTelemetrySdk.builder()
-            .setResultAsGlobal(false)
-            .build()
-            .getOpenTelemetrySdk()) {
+        AutoConfiguredOpenTelemetrySdk.builder().build().getOpenTelemetrySdk()) {
       assertThat(GlobalOpenTelemetry.get()).isNotSameAs(sdk);
     }
   }

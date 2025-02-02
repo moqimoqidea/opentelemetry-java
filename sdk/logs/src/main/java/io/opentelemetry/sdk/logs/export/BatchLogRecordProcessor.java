@@ -18,6 +18,7 @@ import io.opentelemetry.sdk.logs.ReadWriteLogRecord;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -36,13 +37,15 @@ import java.util.logging.Logger;
  * {@code maxQueueSize} maximum size, if queue is full logs are dropped). Logs are exported either
  * when there are {@code maxExportBatchSize} pending logs or {@code scheduleDelayNanos} has passed
  * since the last export finished.
+ *
+ * @since 1.27.0
  */
 public final class BatchLogRecordProcessor implements LogRecordProcessor {
 
   private static final String WORKER_THREAD_NAME =
       BatchLogRecordProcessor.class.getSimpleName() + "_WorkerThread";
   private static final AttributeKey<String> LOG_RECORD_PROCESSOR_TYPE_LABEL =
-      AttributeKey.stringKey("logRecordProcessorType");
+      AttributeKey.stringKey("processorType");
   private static final AttributeKey<Boolean> LOG_RECORD_PROCESSOR_DROPPED_LABEL =
       AttributeKey.booleanKey("dropped");
   private static final String LOG_RECORD_PROCESSOR_TYPE_VALUE =
@@ -102,8 +105,17 @@ public final class BatchLogRecordProcessor implements LogRecordProcessor {
     return worker.forceFlush();
   }
 
+  /**
+   * Return the processor's configured {@link LogRecordExporter}.
+   *
+   * @since 1.37.0
+   */
+  public LogRecordExporter getLogRecordExporter() {
+    return worker.logRecordExporter;
+  }
+
   // Visible for testing
-  ArrayList<LogRecordData> getBatch() {
+  List<LogRecordData> getBatch() {
     return worker.batch;
   }
 
@@ -169,7 +181,7 @@ public final class BatchLogRecordProcessor implements LogRecordProcessor {
       meter
           .gaugeBuilder("queueSize")
           .ofLongs()
-          .setDescription("The number of logs queued")
+          .setDescription("The number of items queued")
           .setUnit("1")
           .buildWithCallback(
               result ->

@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.google.common.collect.ImmutableMap;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.provider.TestConfigurableSamplerProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
@@ -22,13 +23,15 @@ import org.junit.jupiter.api.Test;
 
 public class TracerProviderConfigurationTest {
 
+  private final SpiHelper spiHelper =
+      SpiHelper.create(TracerProviderConfigurationTest.class.getClassLoader());
+
   @Test
   void configuration() {
     ConfigProperties config =
-        DefaultConfigProperties.createForTest(ImmutableMap.of("test.option", "true"));
+        DefaultConfigProperties.createFromMap(ImmutableMap.of("test.option", "true"));
     Sampler sampler =
-        TracerProviderConfiguration.configureSampler(
-            "testSampler", config, TracerProviderConfiguration.class.getClassLoader());
+        TracerProviderConfiguration.configureSampler("testSampler", config, spiHelper);
 
     assertThat(sampler)
         .isInstanceOfSatisfying(
@@ -39,11 +42,11 @@ public class TracerProviderConfigurationTest {
   @Test
   void emptyClassLoader() {
     ConfigProperties config =
-        DefaultConfigProperties.createForTest(ImmutableMap.of("test.option", "true"));
+        DefaultConfigProperties.createFromMap(ImmutableMap.of("test.option", "true"));
     assertThatThrownBy(
             () ->
                 TracerProviderConfiguration.configureSampler(
-                    "testSampler", config, new URLClassLoader(new URL[0], null)))
+                    "testSampler", config, SpiHelper.create(new URLClassLoader(new URL[0], null))))
         .isInstanceOf(ConfigurationException.class)
         .hasMessageContaining("testSampler");
   }
@@ -54,8 +57,8 @@ public class TracerProviderConfigurationTest {
             () ->
                 TracerProviderConfiguration.configureSampler(
                     "catSampler",
-                    DefaultConfigProperties.createForTest(Collections.emptyMap()),
-                    TracerProviderConfiguration.class.getClassLoader()))
+                    DefaultConfigProperties.createFromMap(Collections.emptyMap()),
+                    spiHelper))
         .isInstanceOf(ConfigurationException.class)
         .hasMessageContaining("catSampler");
   }
@@ -65,8 +68,8 @@ public class TracerProviderConfigurationTest {
     assertThat(
             TracerProviderConfiguration.configureSampler(
                 "parentbased_jaeger_remote",
-                DefaultConfigProperties.createForTest(Collections.emptyMap()),
-                TracerProviderConfigurationTest.class.getClassLoader()))
+                DefaultConfigProperties.createFromMap(Collections.emptyMap()),
+                spiHelper))
         .satisfies(
             sampler -> {
               assertThat(sampler.getClass().getSimpleName()).isEqualTo("ParentBasedSampler");

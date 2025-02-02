@@ -11,13 +11,22 @@ import static java.util.Objects.requireNonNull;
 import io.grpc.ManagedChannel;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.MeterProvider;
-import io.opentelemetry.exporter.internal.grpc.GrpcExporter;
+import io.opentelemetry.exporter.internal.compression.Compressor;
+import io.opentelemetry.exporter.internal.compression.CompressorProvider;
+import io.opentelemetry.exporter.internal.compression.CompressorUtil;
 import io.opentelemetry.exporter.internal.grpc.GrpcExporterBuilder;
-import io.opentelemetry.exporter.internal.otlp.OtlpUserAgent;
-import io.opentelemetry.exporter.internal.otlp.traces.TraceRequestMarshaler;
+import io.opentelemetry.exporter.internal.marshal.Marshaler;
+import io.opentelemetry.exporter.otlp.internal.OtlpUserAgent;
+import io.opentelemetry.sdk.common.export.MemoryMode;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import java.net.URI;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.X509TrustManager;
 
 /** Builder utility for this exporter. */
 public final class OtlpGrpcSpanExporterBuilder {
@@ -30,20 +39,28 @@ public final class OtlpGrpcSpanExporterBuilder {
   private static final String DEFAULT_ENDPOINT_URL = "http://localhost:4317";
   private static final URI DEFAULT_ENDPOINT = URI.create(DEFAULT_ENDPOINT_URL);
   private static final long DEFAULT_TIMEOUT_SECS = 10;
+  private static final MemoryMode DEFAULT_MEMORY_MODE = MemoryMode.REUSABLE_DATA;
 
   // Visible for testing
-  final GrpcExporterBuilder<TraceRequestMarshaler> delegate;
+  final GrpcExporterBuilder<Marshaler> delegate;
+  private MemoryMode memoryMode;
+
+  OtlpGrpcSpanExporterBuilder(GrpcExporterBuilder<Marshaler> delegate, MemoryMode memoryMode) {
+    this.delegate = delegate;
+    this.memoryMode = memoryMode;
+    OtlpUserAgent.addUserAgentHeader(delegate::addConstantHeader);
+  }
 
   OtlpGrpcSpanExporterBuilder() {
-    delegate =
-        GrpcExporter.builder(
+    this(
+        new GrpcExporterBuilder<>(
             "otlp",
             "span",
             DEFAULT_TIMEOUT_SECS,
             DEFAULT_ENDPOINT,
             () -> MarshalerTraceServiceGrpc::newFutureStub,
-            GRPC_ENDPOINT_PATH);
-    OtlpUserAgent.addUserAgentHeader(delegate::addHeader);
+            GRPC_ENDPOINT_PATH),
+        DEFAULT_MEMORY_MODE);
   }
 
   /**
@@ -87,6 +104,30 @@ public final class OtlpGrpcSpanExporterBuilder {
   }
 
   /**
+   * Sets the maximum time to wait for new connections to be established. If unset, defaults to
+   * {@value GrpcExporterBuilder#DEFAULT_CONNECT_TIMEOUT_SECS}s.
+   *
+   * @since 1.36.0
+   */
+  public OtlpGrpcSpanExporterBuilder setConnectTimeout(long timeout, TimeUnit unit) {
+    requireNonNull(unit, "unit");
+    checkArgument(timeout >= 0, "timeout must be non-negative");
+    delegate.setConnectTimeout(timeout, unit);
+    return this;
+  }
+
+  /**
+   * Sets the maximum time to wait for new connections to be established. If unset, defaults to
+   * {@value GrpcExporterBuilder#DEFAULT_CONNECT_TIMEOUT_SECS}s.
+   *
+   * @since 1.36.0
+   */
+  public OtlpGrpcSpanExporterBuilder setConnectTimeout(Duration timeout) {
+    requireNonNull(timeout, "timeout");
+    return setConnectTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
+  }
+
+  /**
    * Sets the OTLP endpoint to connect to. If unset, defaults to {@value DEFAULT_ENDPOINT_URL}. The
    * endpoint must start with either http:// or https://.
    */
@@ -97,15 +138,14 @@ public final class OtlpGrpcSpanExporterBuilder {
   }
 
   /**
-   * Sets the method used to compress payloads. If unset, compression is disabled. Currently
-   * supported compression methods include "gzip" and "none".
+   * Sets the method used to compress payloads. If unset, compression is disabled. Compression
+   * method "gzip" and "none" are supported out of the box. Support for additional compression
+   * methods is available by implementing {@link Compressor} and {@link CompressorProvider}.
    */
   public OtlpGrpcSpanExporterBuilder setCompression(String compressionMethod) {
     requireNonNull(compressionMethod, "compressionMethod");
-    checkArgument(
-        compressionMethod.equals("gzip") || compressionMethod.equals("none"),
-        "Unsupported compression method. Supported compression methods include: gzip, none.");
-    delegate.setCompression(compressionMethod);
+    Compressor compressor = CompressorUtil.validateAndResolveCompressor(compressionMethod);
+    delegate.setCompression(compressor);
     return this;
   }
 
@@ -115,7 +155,7 @@ public final class OtlpGrpcSpanExporterBuilder {
    * use the system default trusted certificates.
    */
   public OtlpGrpcSpanExporterBuilder setTrustedCertificates(byte[] trustedCertificatesPem) {
-    delegate.setTrustedCertificates(trustedCertificatesPem);
+    delegate.setTrustManagerFromCerts(trustedCertificatesPem);
     return this;
   }
 
@@ -124,20 +164,57 @@ public final class OtlpGrpcSpanExporterBuilder {
    * The key must be PKCS8, and both must be in PEM format.
    */
   public OtlpGrpcSpanExporterBuilder setClientTls(byte[] privateKeyPem, byte[] certificatePem) {
-    delegate.setClientTls(privateKeyPem, certificatePem);
+    delegate.setKeyManagerFromCerts(privateKeyPem, certificatePem);
     return this;
   }
 
   /**
-   * Add header to request. Optional. Applicable only if {@link
-   * OtlpGrpcSpanExporterBuilder#setChannel(ManagedChannel)} is not called.
+   * Sets the "bring-your-own" SSLContext for use with TLS. Users should call this _or_ set raw
+   * certificate bytes, but not both.
+   *
+   * @since 1.26.0
+   */
+  public OtlpGrpcSpanExporterBuilder setSslContext(
+      SSLContext sslContext, X509TrustManager trustManager) {
+    delegate.setSslContext(sslContext, trustManager);
+    return this;
+  }
+
+  /**
+   * Add a constant header to requests. If the {@code key} collides with another constant header
+   * name or a one from {@link #setHeaders(Supplier)}, the values from both are included. Applicable
+   * only if {@link OtlpGrpcSpanExporterBuilder#setChannel(ManagedChannel)} is not used to set
+   * channel.
    *
    * @param key header key
    * @param value header value
    * @return this builder's instance
    */
   public OtlpGrpcSpanExporterBuilder addHeader(String key, String value) {
-    delegate.addHeader(key, value);
+    delegate.addConstantHeader(key, value);
+    return this;
+  }
+
+  /**
+   * Set the supplier of headers to add to requests. If a key from the map collides with a constant
+   * from {@link #addHeader(String, String)}, the values from both are included. Applicable only if
+   * {@link OtlpGrpcSpanExporterBuilder#setChannel(ManagedChannel)} is not used to set channel.
+   *
+   * @since 1.33.0
+   */
+  public OtlpGrpcSpanExporterBuilder setHeaders(Supplier<Map<String, String>> headerSupplier) {
+    delegate.setHeadersSupplier(headerSupplier);
+    return this;
+  }
+
+  /**
+   * Set the retry policy, or {@code null} to disable retry. Retry policy is {@link
+   * RetryPolicy#getDefault()} by default
+   *
+   * @since 1.28.0
+   */
+  public OtlpGrpcSpanExporterBuilder setRetryPolicy(@Nullable RetryPolicy retryPolicy) {
+    delegate.setRetryPolicy(retryPolicy);
     return this;
   }
 
@@ -147,7 +224,34 @@ public final class OtlpGrpcSpanExporterBuilder {
    */
   public OtlpGrpcSpanExporterBuilder setMeterProvider(MeterProvider meterProvider) {
     requireNonNull(meterProvider, "meterProvider");
-    delegate.setMeterProvider(meterProvider);
+    setMeterProvider(() -> meterProvider);
+    return this;
+  }
+
+  /**
+   * Sets the {@link MeterProvider} supplier used to collect metrics related to export. If not set,
+   * uses {@link GlobalOpenTelemetry#getMeterProvider()}.
+   *
+   * @since 1.32.0
+   */
+  public OtlpGrpcSpanExporterBuilder setMeterProvider(
+      Supplier<MeterProvider> meterProviderSupplier) {
+    requireNonNull(meterProviderSupplier, "meterProviderSupplier");
+    delegate.setMeterProvider(meterProviderSupplier);
+    return this;
+  }
+
+  /**
+   * Set the {@link MemoryMode}. If unset, defaults to {@link #DEFAULT_MEMORY_MODE}.
+   *
+   * <p>When memory mode is {@link MemoryMode#REUSABLE_DATA}, serialization is optimized to reduce
+   * memory allocation.
+   *
+   * @since 1.39.0
+   */
+  public OtlpGrpcSpanExporterBuilder setMemoryMode(MemoryMode memoryMode) {
+    requireNonNull(memoryMode, "memoryMode");
+    this.memoryMode = memoryMode;
     return this;
   }
 
@@ -157,6 +261,6 @@ public final class OtlpGrpcSpanExporterBuilder {
    * @return a new exporter's instance
    */
   public OtlpGrpcSpanExporter build() {
-    return new OtlpGrpcSpanExporter(delegate.build());
+    return new OtlpGrpcSpanExporter(delegate, delegate.build(), memoryMode);
   }
 }

@@ -27,7 +27,7 @@ dependencies {
 
 testing {
   suites {
-    val testStrictContext by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("testStrictContext") {
       dependencies {
         implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.5.2")
@@ -48,6 +48,7 @@ tasks {
   withType(KotlinCompile::class) {
     kotlinOptions {
       jvmTarget = "1.8"
+      languageVersion = "1.6"
     }
   }
 

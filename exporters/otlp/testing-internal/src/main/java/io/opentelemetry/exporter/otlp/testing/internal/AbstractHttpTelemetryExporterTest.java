@@ -8,7 +8,6 @@ package io.opentelemetry.exporter.otlp.testing.internal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.junit.jupiter.api.Named.named;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
@@ -19,6 +18,7 @@ import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.common.RequestHeaders;
+import com.linecorp.armeria.common.TlsKeyPair;
 import com.linecorp.armeria.server.HttpService;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.ServiceRequestContext;
@@ -26,10 +26,13 @@ import com.linecorp.armeria.server.logging.LoggingService;
 import com.linecorp.armeria.testing.junit5.server.SelfSignedCertificateExtension;
 import com.linecorp.armeria.testing.junit5.server.ServerExtension;
 import io.github.netmikey.logunit.api.LogCapturer;
-import io.opentelemetry.exporter.internal.grpc.UpstreamGrpcExporter;
+import io.opentelemetry.exporter.internal.FailedExportException;
+import io.opentelemetry.exporter.internal.TlsUtil;
+import io.opentelemetry.exporter.internal.compression.GzipCompressor;
+import io.opentelemetry.exporter.internal.http.HttpExporter;
+import io.opentelemetry.exporter.internal.http.HttpSender;
 import io.opentelemetry.exporter.internal.marshal.Marshaler;
-import io.opentelemetry.exporter.internal.okhttp.OkHttpExporter;
-import io.opentelemetry.exporter.internal.retry.RetryPolicy;
+import io.opentelemetry.exporter.otlp.testing.internal.compressor.Base64Compressor;
 import io.opentelemetry.internal.testing.slf4j.SuppressLogger;
 import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest;
 import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse;
@@ -38,15 +41,21 @@ import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.export.ProxyOptions;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.cert.CertificateEncodingException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -56,9 +65,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509KeyManager;
+import javax.net.ssl.X509TrustManager;
 import okio.Buffer;
 import okio.GzipSource;
 import okio.Okio;
+import okio.Source;
+import org.assertj.core.api.Assertions;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.assertj.core.api.iterable.ThrowingExtractor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -73,6 +90,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.ArgumentsProvider;
 import org.junit.jupiter.params.provider.ArgumentsSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockserver.integration.ClientAndServer;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
 
@@ -126,7 +144,7 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
 
           sb.http(0);
           sb.https(0);
-          sb.tls(certificate.certificateFile(), certificate.privateKeyFile());
+          sb.tls(TlsKeyPair.of(certificate.privateKey(), certificate.certificate()));
           sb.tlsCustomizer(ssl -> ssl.trustManager(clientCertificate.certificate()));
           sb.decorator(LoggingService.newDecorator());
         }
@@ -156,8 +174,7 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
                   aggReq -> {
                     T request;
                     try {
-                      byte[] requestBody =
-                          maybeGzipInflate(aggReq.headers(), aggReq.content().array());
+                      byte[] requestBody = maybeInflate(aggReq.headers(), aggReq.content().array());
                       request = parse.extractThrows(requestBody);
                     } catch (IOException e) {
                       throw new UncheckedIOException(e);
@@ -171,22 +188,29 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
                             MediaType.parse("application/x-protobuf"),
                             successResponse);
                   });
-      return HttpResponse.from(responseFuture);
+      return HttpResponse.of(responseFuture);
     }
 
-    private static byte[] maybeGzipInflate(RequestHeaders requestHeaders, byte[] content)
+    private static byte[] maybeInflate(RequestHeaders requestHeaders, byte[] content)
         throws IOException {
-      if (!requestHeaders.contains("content-encoding", "gzip")) {
-        return content;
+      if (requestHeaders.contains("content-encoding", "gzip")) {
+        Buffer buffer = new Buffer();
+        GzipSource gzipSource = new GzipSource(Okio.source(new ByteArrayInputStream(content)));
+        gzipSource.read(buffer, Integer.MAX_VALUE);
+        return buffer.readByteArray();
       }
-      Buffer buffer = new Buffer();
-      GzipSource gzipSource = new GzipSource(Okio.source(new ByteArrayInputStream(content)));
-      gzipSource.read(buffer, Integer.MAX_VALUE);
-      return buffer.readByteArray();
+      if (requestHeaders.contains("content-encoding", "base64")) {
+        Buffer buffer = new Buffer();
+        Source base64Source =
+            Okio.source(Base64.getDecoder().wrap(new ByteArrayInputStream(content)));
+        base64Source.read(buffer, Integer.MAX_VALUE);
+        return buffer.readByteArray();
+      }
+      return content;
     }
   }
 
-  @RegisterExtension LogCapturer logs = LogCapturer.create().captureForType(OkHttpExporter.class);
+  @RegisterExtension LogCapturer logs = LogCapturer.create().captureForType(HttpExporter.class);
 
   private final String type;
   private final String path;
@@ -203,7 +227,18 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
 
   @BeforeAll
   void setUp() {
-    exporter = exporterBuilder().setEndpoint(server.httpUri() + path).build();
+    //
+    exporter =
+        exporterBuilder()
+            .setEndpoint(server.httpUri() + path)
+            // We don't validate backoff time itself in these tests, just that retries
+            // occur. Keep the tests fast by using minimal backoff.
+            .setRetryPolicy(
+                RetryPolicy.getDefault().toBuilder()
+                    .setMaxAttempts(2)
+                    .setInitialBackoff(Duration.ofMillis(1))
+                    .build())
+            .build();
 
     // Sanity check that TLS files are in PEM format.
     assertThat(certificate.certificateFile())
@@ -268,7 +303,7 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   void compressionWithNone() {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri() + path).setCompression("none").build();
-    assertThat(exporter.unwrap()).extracting("delegate.compressionEnabled").isEqualTo(false);
+    assertThat(exporter.unwrap()).extracting("delegate.httpSender.compressor").isNull();
     try {
       CompletableResultCode result =
           exporter.export(Collections.singletonList(generateFakeTelemetry()));
@@ -285,11 +320,9 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   void compressionWithGzip() {
     TelemetryExporter<T> exporter =
         exporterBuilder().setEndpoint(server.httpUri() + path).setCompression("gzip").build();
-    // UpstreamGrpcExporter doesn't support compression, so we skip the assertion
-    assumeThat(exporter.unwrap())
-        .extracting("delegate")
-        .isNotInstanceOf(UpstreamGrpcExporter.class);
-    assertThat(exporter.unwrap()).extracting("delegate.compressionEnabled").isEqualTo(true);
+    assertThat(exporter.unwrap())
+        .extracting("delegate.httpSender.compressor")
+        .isEqualTo(GzipCompressor.getInstance());
     try {
       CompletableResultCode result =
           exporter.export(Collections.singletonList(generateFakeTelemetry()));
@@ -297,6 +330,25 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
       assertThat(httpRequests)
           .singleElement()
           .satisfies(req -> assertThat(req.headers().get("content-encoding")).isEqualTo("gzip"));
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  void compressionWithSpiCompressor() {
+    TelemetryExporter<T> exporter =
+        exporterBuilder().setEndpoint(server.httpUri() + path).setCompression("base64").build();
+    assertThat(exporter.unwrap())
+        .extracting("delegate.httpSender.compressor")
+        .isEqualTo(Base64Compressor.getInstance());
+    try {
+      CompletableResultCode result =
+          exporter.export(Collections.singletonList(generateFakeTelemetry()));
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+      assertThat(httpRequests)
+          .singleElement()
+          .satisfies(req -> assertThat(req.headers().get("content-encoding")).isEqualTo("base64"));
     } finally {
       exporter.shutdown();
     }
@@ -319,15 +371,31 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
 
   @Test
   void withHeaders() {
+    AtomicInteger count = new AtomicInteger();
     TelemetryExporter<T> exporter =
-        exporterBuilder().setEndpoint(server.httpUri() + path).addHeader("key", "value").build();
+        exporterBuilder()
+            .setEndpoint(server.httpUri() + path)
+            .addHeader("key1", "value1")
+            .setHeaders(() -> Collections.singletonMap("key2", "value" + count.incrementAndGet()))
+            .build();
     try {
+      // Export twice to ensure header supplier gets invoked twice
       CompletableResultCode result =
           exporter.export(Collections.singletonList(generateFakeTelemetry()));
       assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+      result = exporter.export(Collections.singletonList(generateFakeTelemetry()));
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+
       assertThat(httpRequests)
-          .singleElement()
-          .satisfies(req -> assertThat(req.headers().get("key")).isEqualTo("value"));
+          .satisfiesExactly(
+              req -> {
+                assertThat(req.headers().get("key1")).isEqualTo("value1");
+                assertThat(req.headers().get("key2")).isEqualTo("value" + (count.get() - 1));
+              },
+              req -> {
+                assertThat(req.headers().get("key1")).isEqualTo("value1");
+                assertThat(req.headers().get("key2")).isEqualTo("value" + count.get());
+              });
     } finally {
       exporter.shutdown();
     }
@@ -350,7 +418,32 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpExporter.class)
+  void tlsViaSslContext() throws Exception {
+    X509TrustManager trustManager = TlsUtil.trustManager(certificate.certificate().getEncoded());
+
+    X509KeyManager keyManager =
+        TlsUtil.keyManager(
+            certificate.privateKey().getEncoded(), certificate.certificate().getEncoded());
+
+    SSLContext sslContext = SSLContext.getInstance("TLS");
+    sslContext.init(new KeyManager[] {keyManager}, new TrustManager[] {trustManager}, null);
+
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            .setEndpoint(server.httpsUri() + path)
+            .setSslContext(sslContext, trustManager)
+            .build();
+    try {
+      CompletableResultCode result =
+          exporter.export(Collections.singletonList(generateFakeTelemetry()));
+      assertThat(result.join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  @SuppressLogger(HttpExporter.class)
   void tls_untrusted() {
     TelemetryExporter<T> exporter = exporterBuilder().setEndpoint(server.httpsUri() + path).build();
     try {
@@ -368,10 +461,9 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
             () ->
                 exporterBuilder()
                     .setEndpoint(server.httpsUri() + path)
-                    .setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8))
-                    .build())
+                    .setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8)))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("Could not set trusted certificate");
+        .hasMessageContaining("Error creating X509TrustManager with provided certs");
   }
 
   @ParameterizedTest
@@ -404,6 +496,43 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
+  @SuppressLogger(HttpExporter.class)
+  void connectTimeout() {
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            // Connecting to a non-routable IP address to trigger connection error
+            .setEndpoint("http://10.255.255.1")
+            .setConnectTimeout(Duration.ofMillis(1))
+            .setRetryPolicy(null)
+            .build();
+    try {
+      long startTimeMillis = System.currentTimeMillis();
+      CompletableResultCode result =
+          exporter
+              .export(Collections.singletonList(generateFakeTelemetry()))
+              .join(10, TimeUnit.SECONDS);
+
+      assertThat(result.isSuccess()).isFalse();
+
+      assertThat(result.getFailureThrowable())
+          .asInstanceOf(
+              InstanceOfAssertFactories.throwable(FailedExportException.HttpExportException.class))
+          .returns(false, Assertions.from(FailedExportException::failedWithResponse))
+          .satisfies(
+              ex -> {
+                assertThat(ex.getResponse()).isNull();
+                assertThat(ex.getCause()).isNotNull();
+              });
+
+      // Assert that the export request fails well before the default connect timeout of 10s
+      assertThat(System.currentTimeMillis() - startTimeMillis)
+          .isLessThan(TimeUnit.SECONDS.toMillis(1));
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
   void deadlineSetPerExport() throws InterruptedException {
     TelemetryExporter<T> exporter =
         exporterBuilder()
@@ -421,7 +550,7 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpExporter.class)
+  @SuppressLogger(HttpExporter.class)
   void exportAfterShutdown() {
     TelemetryExporter<T> exporter = exporterBuilder().setEndpoint(server.httpUri() + path).build();
     exporter.shutdown();
@@ -435,25 +564,49 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   }
 
   @Test
-  @SuppressLogger(OkHttpExporter.class)
+  @SuppressLogger(HttpExporter.class)
   void doubleShutdown() {
+    int logsSizeBefore = logs.getEvents().size();
     TelemetryExporter<T> exporter = exporterBuilder().setEndpoint(server.httpUri() + path).build();
     assertThat(exporter.shutdown().join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
-    assertThat(logs.getEvents()).isEmpty();
+    assertThat(logs.getEvents()).hasSize(logsSizeBefore);
+    logs.assertDoesNotContain("Calling shutdown() multiple times.");
     assertThat(exporter.shutdown().join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
     logs.assertContains("Calling shutdown() multiple times.");
   }
 
   @Test
-  @SuppressLogger(OkHttpExporter.class)
+  @SuppressLogger(HttpExporter.class)
   void error() {
-    addHttpError(500);
-    assertThat(
-            exporter
-                .export(Collections.singletonList(generateFakeTelemetry()))
-                .join(10, TimeUnit.SECONDS)
-                .isSuccess())
-        .isFalse();
+    int statusCode = 500;
+    addHttpError(statusCode);
+    CompletableResultCode result =
+        exporter
+            .export(Collections.singletonList(generateFakeTelemetry()))
+            .join(10, TimeUnit.SECONDS);
+
+    assertThat(result.isSuccess()).isFalse();
+
+    assertThat(result.getFailureThrowable())
+        .asInstanceOf(
+            InstanceOfAssertFactories.throwable(FailedExportException.HttpExportException.class))
+        .returns(true, Assertions.from(FailedExportException::failedWithResponse))
+        .satisfies(
+            ex -> {
+              assertThat(ex.getResponse())
+                  .isNotNull()
+                  .satisfies(
+                      response -> {
+                        assertThat(response)
+                            .extracting(HttpSender.Response::statusCode)
+                            .isEqualTo(statusCode);
+
+                        assertThatCode(response::responseBody).doesNotThrowAnyException();
+                      });
+
+              assertThat(ex.getCause()).isNull();
+            });
+
     LoggingEvent log =
         logs.assertContains(
             "Failed to export "
@@ -467,76 +620,117 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
   void retryableError(int code) {
     addHttpError(code);
 
-    TelemetryExporter<T> exporter = retryingExporter();
-
-    try {
-      assertThat(
-              exporter
-                  .export(Collections.singletonList(generateFakeTelemetry()))
-                  .join(10, TimeUnit.SECONDS)
-                  .isSuccess())
-          .isTrue();
-    } finally {
-      exporter.shutdown();
-    }
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isTrue();
 
     assertThat(attempts).hasValue(2);
   }
 
   @Test
-  @SuppressLogger(OkHttpExporter.class)
+  @SuppressLogger(HttpExporter.class)
   void retryableError_tooManyAttempts() {
     addHttpError(502);
     addHttpError(502);
 
-    TelemetryExporter<T> exporter = retryingExporter();
-
-    try {
-      assertThat(
-              exporter
-                  .export(Collections.singletonList(generateFakeTelemetry()))
-                  .join(10, TimeUnit.SECONDS)
-                  .isSuccess())
-          .isFalse();
-    } finally {
-      exporter.shutdown();
-    }
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isFalse();
 
     assertThat(attempts).hasValue(2);
   }
 
   @ParameterizedTest
-  @SuppressLogger(OkHttpExporter.class)
+  @SuppressLogger(HttpExporter.class)
   @ValueSource(ints = {400, 401, 403, 500, 501})
   void nonRetryableError(int code) {
     addHttpError(code);
 
-    TelemetryExporter<T> exporter = retryingExporter();
-
-    try {
-      assertThat(
-              exporter
-                  .export(Collections.singletonList(generateFakeTelemetry()))
-                  .join(10, TimeUnit.SECONDS)
-                  .isSuccess())
-          .isFalse();
-    } finally {
-      exporter.shutdown();
-    }
+    assertThat(
+            exporter
+                .export(Collections.singletonList(generateFakeTelemetry()))
+                .join(10, TimeUnit.SECONDS)
+                .isSuccess())
+        .isFalse();
 
     assertThat(attempts).hasValue(1);
   }
 
   @Test
+  void proxy() {
+    // configure mockserver to proxy to the local OTLP server
+    InetSocketAddress serverSocketAddress = server.httpSocketAddress();
+    try (ClientAndServer clientAndServer =
+        ClientAndServer.startClientAndServer(
+            serverSocketAddress.getHostName(), serverSocketAddress.getPort())) {
+      TelemetryExporter<T> exporter =
+          exporterBuilder()
+              // Configure exporter with server endpoint, and proxy options to route through
+              // mockserver proxy
+              .setEndpoint(server.httpUri() + path)
+              .setProxyOptions(
+                  ProxyOptions.create(
+                      InetSocketAddress.createUnresolved("localhost", clientAndServer.getPort())))
+              .build();
+
+      try {
+        List<T> telemetry = Collections.singletonList(generateFakeTelemetry());
+
+        assertThat(exporter.export(telemetry).join(10, TimeUnit.SECONDS).isSuccess()).isTrue();
+        // assert that mock server received request
+        assertThat(clientAndServer.retrieveRecordedRequests(new org.mockserver.model.HttpRequest()))
+            .hasSize(1);
+        // assert that server received telemetry from proxy, and is as expected
+        List<U> expectedResourceTelemetry = toProto(telemetry);
+        assertThat(exportedResourceTelemetry).containsExactlyElementsOf(expectedResourceTelemetry);
+      } finally {
+        exporter.shutdown();
+      }
+    }
+  }
+
+  @Test
   @SuppressWarnings("PreferJavaTimeOverload")
   void validConfig() {
-    assertThatCode(() -> exporterBuilder().setTimeout(0, TimeUnit.MILLISECONDS))
+    // We must build exporters to test timeout settings, which intersect with underlying client
+    // implementations and may convert between Duration, int, and long, which may be susceptible to
+    // overflow exceptions.
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(0, TimeUnit.MILLISECONDS)))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(Duration.ofMillis(0)))
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofMillis(0))))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(10, TimeUnit.MILLISECONDS))
+    assertThatCode(
+            () ->
+                buildAndShutdown(
+                    exporterBuilder().setTimeout(Long.MAX_VALUE, TimeUnit.NANOSECONDS)))
         .doesNotThrowAnyException();
-    assertThatCode(() -> exporterBuilder().setTimeout(Duration.ofMillis(10)))
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofNanos(Long.MAX_VALUE))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setTimeout(Long.MAX_VALUE, TimeUnit.SECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(10, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(() -> buildAndShutdown(exporterBuilder().setTimeout(Duration.ofMillis(10))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(0, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(Duration.ofMillis(0))))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(10, TimeUnit.MILLISECONDS)))
+        .doesNotThrowAnyException();
+    assertThatCode(
+            () -> buildAndShutdown(exporterBuilder().setConnectTimeout(Duration.ofMillis(10))))
         .doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().setEndpoint("http://localhost:4318"))
@@ -549,15 +743,21 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
         .doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().setCompression("gzip")).doesNotThrowAnyException();
+    // SPI compressor available for this test but not packaged with OTLP exporter
+    assertThatCode(() -> exporterBuilder().setCompression("base64")).doesNotThrowAnyException();
     assertThatCode(() -> exporterBuilder().setCompression("none")).doesNotThrowAnyException();
 
     assertThatCode(() -> exporterBuilder().addHeader("foo", "bar").addHeader("baz", "qux"))
         .doesNotThrowAnyException();
 
     assertThatCode(
-            () ->
-                exporterBuilder().setTrustedCertificates("foobar".getBytes(StandardCharsets.UTF_8)))
+            () -> exporterBuilder().setTrustedCertificates(certificate.certificate().getEncoded()))
         .doesNotThrowAnyException();
+  }
+
+  private void buildAndShutdown(TelemetryExporterBuilder<T> builder) {
+    TelemetryExporter<T> build = builder.build();
+    build.shutdown().join(10, TimeUnit.MILLISECONDS);
   }
 
   @Test
@@ -572,6 +772,25 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
     assertThatThrownBy(() -> exporterBuilder().setTimeout(null))
         .isInstanceOf(NullPointerException.class)
         .hasMessage("timeout");
+    assertThatThrownBy(
+            () ->
+                buildAndShutdown(exporterBuilder().setTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+        .isInstanceOf(ArithmeticException.class);
+
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(-1, TimeUnit.MILLISECONDS))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("timeout must be non-negative");
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(1, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("unit");
+    assertThatThrownBy(() -> exporterBuilder().setConnectTimeout(null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("timeout");
+    assertThatThrownBy(
+            () ->
+                buildAndShutdown(
+                    exporterBuilder().setConnectTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+        .isInstanceOf(ArithmeticException.class);
 
     assertThatThrownBy(() -> exporterBuilder().setEndpoint(null))
         .isInstanceOf(NullPointerException.class)
@@ -592,10 +811,141 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
     assertThatThrownBy(() -> exporterBuilder().setCompression("foo"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage(
-            "Unsupported compression method. Supported compression methods include: gzip, none.");
+            "Unsupported compressionMethod. Compression method must be \"none\" or one of: [base64,gzip]");
+  }
+
+  @Test
+  void toBuilderEquality()
+      throws CertificateEncodingException,
+          IOException,
+          NoSuchFieldException,
+          IllegalAccessException {
+    TelemetryExporter<T> exporter =
+        exporterBuilder()
+            .setTimeout(Duration.ofSeconds(5))
+            .setConnectTimeout(Duration.ofSeconds(4))
+            .setEndpoint("http://localhost:4318")
+            .setCompression("gzip")
+            .addHeader("foo", "bar")
+            .setTrustedCertificates(certificate.certificate().getEncoded())
+            .setClientTls(
+                Files.readAllBytes(clientCertificate.privateKeyFile().toPath()),
+                Files.readAllBytes(clientCertificate.certificateFile().toPath()))
+            .setRetryPolicy(
+                RetryPolicy.builder()
+                    .setMaxAttempts(2)
+                    .setMaxBackoff(Duration.ofSeconds(3))
+                    .setInitialBackoff(Duration.ofMillis(50))
+                    .setBackoffMultiplier(1.3)
+                    .build())
+            .build();
+
+    Object unwrapped = exporter.unwrap();
+    Field builderField = unwrapped.getClass().getDeclaredField("builder");
+    builderField.setAccessible(true);
+
+    try {
+      // Builder copy should be equal to original when unchanged
+      TelemetryExporter<T> copy = toBuilder(exporter).build();
+      try {
+        assertThat(copy.unwrap())
+            .extracting("builder")
+            .usingRecursiveComparison()
+            .ignoringFields("tlsConfigHelper")
+            .isEqualTo(builderField.get(unwrapped));
+      } finally {
+        copy.shutdown();
+      }
+
+      // Builder copy should NOT be equal when changed
+      copy = toBuilder(exporter).addHeader("baz", "qux").build();
+      try {
+        assertThat(copy.unwrap())
+            .extracting("builder")
+            .usingRecursiveComparison()
+            .ignoringFields("tlsConfigHelper")
+            .isNotEqualTo(builderField.get(unwrapped));
+      } finally {
+        copy.shutdown();
+      }
+    } finally {
+      exporter.shutdown();
+    }
+  }
+
+  @Test
+  void stringRepresentation() throws IOException, CertificateEncodingException {
+    TelemetryExporter<T> telemetryExporter = exporterBuilder().build();
+    try {
+      assertThat(telemetryExporter.unwrap().toString())
+          .matches(
+              "OtlpHttp[a-zA-Z]*Exporter\\{"
+                  + "exporterName=otlp, "
+                  + "type=[a-zA_Z]*, "
+                  + "endpoint=http://localhost:4318/v1/[a-zA-Z]*, "
+                  + "timeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(10)
+                  + ", "
+                  + "proxyOptions=null, "
+                  + "compressorEncoding=null, "
+                  + "connectTimeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(10)
+                  + ", "
+                  + "exportAsJson=false, "
+                  + "headers=Headers\\{User-Agent=OBFUSCATED\\}"
+                  + ".*" // Maybe additional signal specific fields
+                  + "\\}");
+    } finally {
+      telemetryExporter.shutdown();
+    }
+
+    telemetryExporter =
+        exporterBuilder()
+            .setTimeout(Duration.ofSeconds(5))
+            .setConnectTimeout(Duration.ofSeconds(4))
+            .setEndpoint("http://example:4318/v1/logs")
+            .setCompression("gzip")
+            .addHeader("foo", "bar")
+            .setTrustedCertificates(certificate.certificate().getEncoded())
+            .setClientTls(
+                Files.readAllBytes(clientCertificate.privateKeyFile().toPath()),
+                Files.readAllBytes(clientCertificate.certificateFile().toPath()))
+            .setRetryPolicy(
+                RetryPolicy.builder()
+                    .setMaxAttempts(2)
+                    .setMaxBackoff(Duration.ofSeconds(3))
+                    .setInitialBackoff(Duration.ofMillis(50))
+                    .setBackoffMultiplier(1.3)
+                    .build())
+            .build();
+    try {
+      assertThat(telemetryExporter.unwrap().toString())
+          .matches(
+              "OtlpHttp[a-zA-Z]*Exporter\\{"
+                  + "exporterName=otlp, "
+                  + "type=[a-zA_Z]*, "
+                  + "endpoint=http://example:4318/v1/[a-zA-Z]*, "
+                  + "timeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(5)
+                  + ", "
+                  + "proxyOptions=null, "
+                  + "compressorEncoding=gzip, "
+                  + "connectTimeoutNanos="
+                  + TimeUnit.SECONDS.toNanos(4)
+                  + ", "
+                  + "exportAsJson=false, "
+                  + "headers=Headers\\{.*foo=OBFUSCATED.*\\}, "
+                  + "retryPolicy=RetryPolicy\\{maxAttempts=2, initialBackoff=PT0\\.05S, maxBackoff=PT3S, backoffMultiplier=1\\.3, retryExceptionPredicate=null\\}"
+                  + ".*" // Maybe additional signal specific fields
+                  + "\\}");
+    } finally {
+      telemetryExporter.shutdown();
+    }
   }
 
   protected abstract TelemetryExporterBuilder<T> exporterBuilder();
+
+  protected abstract TelemetryExporterBuilder<T> toBuilder(TelemetryExporter<T> exporter);
 
   protected abstract T generateFakeTelemetry();
 
@@ -621,21 +971,6 @@ public abstract class AbstractHttpTelemetryExporterTest<T, U extends Message> {
               }
             })
         .collect(Collectors.toList());
-  }
-
-  private TelemetryExporter<T> retryingExporter() {
-    return exporterBuilder()
-        .setEndpoint(server.httpUri() + path)
-        .setRetryPolicy(
-            RetryPolicy.builder()
-                .setMaxAttempts(2)
-                // We don't validate backoff time itself in these tests, just that retries
-                // occur. Keep the tests fast by using minimal backoff.
-                .setInitialBackoff(Duration.ofMillis(1))
-                .setMaxBackoff(Duration.ofMillis(1))
-                .setBackoffMultiplier(1)
-                .build())
-        .build();
   }
 
   private static void addHttpError(int code) {

@@ -24,6 +24,13 @@ base {
   }
 }
 
+// normalize timestamps and file ordering in jars, making the outputs reproducible
+// see open-telemetry/opentelemetry-java#4488
+tasks.withType<AbstractArchiveTask>().configureEach {
+  isPreserveFileTimestamps = false
+  isReproducibleFileOrder = true
+}
+
 java {
   toolchain {
     languageVersion.set(JavaLanguageVersion.of(17))
@@ -35,14 +42,28 @@ java {
 
 checkstyle {
   configDirectory.set(file("$rootDir/buildscripts/"))
-  toolVersion = "8.12"
+  toolVersion = "10.21.2"
   isIgnoreFailures = false
   configProperties["rootDir"] = rootDir
 }
 
 dependencyCheck {
-  // spotless-1972451482 is a weird configuration that's only added in jaeger-proto
-  skipConfigurations = listOf("errorprone", "checkstyle", "annotationProcessor", "animalsniffer", "spotless-1972451482")
+  skipConfigurations = mutableListOf(
+    "errorprone",
+    "checkstyle",
+    "annotationProcessor",
+    "java9AnnotationProcessor",
+    "moduleAnnotationProcessor",
+    "testAnnotationProcessor",
+    "testJpmsAnnotationProcessor",
+    "animalsniffer",
+    "spotless996155815", // spotless996155815 is a weird configuration that's only added in jaeger-proto, jaeger-remote-sampler
+    "js2p",
+    "jmhAnnotationProcessor",
+    "jmhBasedTestAnnotationProcessor",
+    "jmhCompileClasspath",
+    "jmhRuntimeClasspath",
+    "jmhRuntimeOnly")
   failBuildOnCVSS = 7.0f // fail on high or critical CVE
   analyzers.assemblyEnabled = false // not sure why its trying to analyze .NET assemblies
 }
@@ -66,7 +87,6 @@ tasks {
             "-Xlint:-processing",
             // We suppress the "options" warning because it prevents compilation on modern JDKs
             "-Xlint:-options",
-
             // Fail build on any warning
             "-Werror",
           ),
@@ -114,12 +134,6 @@ tasks {
       breakIterator(true)
 
       addBooleanOption("html5", true)
-
-      // TODO (trask) revisit to see if url is fixed
-      // currently broken because https://docs.oracle.com/javase/8/docs/api/element-list is missing
-      // and redirects
-      // links("https://docs.oracle.com/javase/8/docs/api/")
-
       addBooleanOption("Xdoclint:all,-missing", true)
     }
   }
@@ -154,7 +168,7 @@ plugins.withId("otel.publish-conventions") {
   tasks {
     register("generateVersionResource") {
       val moduleName = otelJava.moduleName
-      val propertiesDir = moduleName.map { File(buildDir, "generated/properties/${it.replace('.', '/')}") }
+      val propertiesDir = moduleName.map { File(layout.buildDirectory.asFile.get(), "generated/properties/${it.replace('.', '/')}") }
 
       inputs.property("project.version", project.version.toString())
       outputs.dir(propertiesDir)
@@ -167,7 +181,7 @@ plugins.withId("otel.publish-conventions") {
 
   sourceSets {
     main {
-      output.dir("$buildDir/generated/properties", "builtBy" to "generateVersionResource")
+      output.dir("${layout.buildDirectory.asFile.get()}/generated/properties", "builtBy" to "generateVersionResource")
     }
   }
 }
@@ -203,16 +217,14 @@ dependencies {
   // Workaround for @javax.annotation.Generated
   // see: https://github.com/grpc/grpc-java/issues/3633
   compileOnly("javax.annotation:javax.annotation-api")
-}
 
-class TestArgumentsProvider(
-  @InputFile
-  @PathSensitive(PathSensitivity.RELATIVE)
-  val loggingProperties: File,
-) : CommandLineArgumentProvider {
-  override fun asArguments() = listOf(
-    "-Djava.util.logging.config.file=${loggingProperties.absolutePath}",
-  )
+  modules {
+    // checkstyle uses the very old google-collections which causes Java 9 module conflict with
+    // guava which is also on the classpath
+    module("com.google.collections:google-collections") {
+      replacedBy("com.google.guava:guava", "google-collections is now part of Guava")
+    }
+  }
 }
 
 testing {

@@ -1,6 +1,12 @@
-# OpenTelemetry Extension Kotlin
+# OpenTelemetry Kotlin Extension
 
-[![Javadocs][javadoc-image]][javadoc-url]
+Kotlin [Extensions](src/main/kotlin/io/opentelemetry/extension/kotlin/ContextExtensions.kt) to propagate
+OpenTelemetry context into coroutines.
 
-[javadoc-image]: https://www.javadoc.io/badge/io.opentelemetry/opentelemetry-extension-kotlin.svg
-[javadoc-url]: https://www.javadoc.io/doc/io.opentelemetry/opentelemetry-extension-kotlin
+For example, you could do the following with coroutines
+
+```kotlin
+launch(Context.current().asContextElement()) {
+// trace ids propagated here
+}
+```

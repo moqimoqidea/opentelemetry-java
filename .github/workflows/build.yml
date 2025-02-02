@@ -21,45 +21,68 @@ jobs:
       matrix:
         os:
           - macos-latest
-          - ubuntu-20.04
+          - macos-13
+          - ubuntu-latest
+          - windows-latest
         test-java-version:
           - 8
           - 11
           - 17
-          - 19
+          - 21
+          - 23
         # Collect coverage on latest LTS
         include:
           - os: ubuntu-20.04
-            test-java-version: 17
+            test-java-version: 21
             coverage: true
+            jmh-based-tests: true
+        # macos-latest drops support for java 8 temurin. Run java 8 on macos-13. Run java 11, 17, 21 on macos-latest.
+        exclude:
+          - os: macos-latest
+            test-java-version: 8
+          - os: macos-13
+            test-java-version: 11
+          - os: macos-13
+            test-java-version: 17
+          - os: macos-13
+            test-java-version: 21
+          - os: macos-13
+            test-java-version: 23
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-java-test
         name: Set up Java ${{ matrix.test-java-version }} for tests
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ matrix.test-java-version }}
 
       - id: setup-java
         name: Set up Java for build
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: gradle/gradle-build-action@v2
-        with:
-          arguments: |
-            build
+      - name: Set up gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Build
+        run: >
+            ./gradlew build
             ${{ matrix.coverage && 'jacocoTestReport' || '' }}
             -PtestJavaVersion=${{ matrix.test-java-version }}
-            -Porg.gradle.java.installations.paths=${{ steps.setup-java-test.outputs.path }},${{ steps.setup-java.outputs.path }}
+            "-Porg.gradle.java.installations.paths=${{ steps.setup-java-test.outputs.path }}"
+            "-Porg.gradle.java.installations.auto-download=false"
+        env:
+          # JMH-based tests run only  if this environment variable is set to true
+          RUN_JMH_BASED_TESTS: ${{ matrix.jmh-based-tests }}
 
       - name: Check for diff
-        # The jApiCmp diff compares current to latest, which isn't appropriate for release branches
-        if: ${{ !startsWith(github.ref_name, 'release/') && !startsWith(github.base_ref, 'release/') }}
+        # The jApiCmp diff compares current to latest, which isn't appropriate for release branches, or for bot-generated PRs
+        # this fails on windows because of the bash-specific if/then/else syntax, but that's ok
+        # because we only need to run this validation once (on any platform)
+        if: ${{ matrix.os != 'windows-latest' && !startsWith(github.ref_name, 'release/') && !startsWith(github.base_ref, 'release/') && (github.actor != 'opentelemetrybot') }}
         run: |
           # need to "git add" in case any generated files did not already exist
           git add docs/apidiffs
@@ -73,10 +96,12 @@ jobs:
             exit 1
           fi
 
-      - uses: codecov/codecov-action@v3
+      - uses: codecov/codecov-action@v5
         if: ${{ matrix.coverage }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: ${{ matrix.coverage }}
         with:
           name: coverage-report
@@ -105,23 +130,27 @@ jobs:
     name: publish-snapshots${{ (github.ref_name != 'main' || github.repository != 'open-telemetry/opentelemetry-java') && ' (skipped)' || '' }}
     # intentionally not blocking snapshot publishing on markdown-link-check or misspell-check
     needs: build
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-java
         name: Set up Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: gradle/gradle-build-action@v2
+      - name: Set up gradle
+        uses: gradle/actions/setup-gradle@v4
         # skipping release branches because the versions in those branches are not snapshots
         # (also this skips pull requests)
         if: ${{ github.ref_name == 'main' && github.repository == 'open-telemetry/opentelemetry-java' }}
-        with:
-          arguments: assemble publishToSonatype
+      - name: Publish to Sonatype
+        run: ./gradlew assemble publishToSonatype
+        # skipping release branches because the versions in those branches are not snapshots
+        # (also this skips pull requests)
+        if: ${{ github.ref_name == 'main' && github.repository == 'open-telemetry/opentelemetry-java' }}
         env:
           SONATYPE_USER: ${{ secrets.SONATYPE_USER }}
           SONATYPE_KEY: ${{ secrets.SONATYPE_KEY }}
@@ -131,11 +160,12 @@ jobs:
   build-graal:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: graalvm/setup-graalvm@v1
         with:
-          version: 'latest'
-          java-version: '11'
+          # TODO(jack-berg): Which versions do we need to test? Should we use a matrix scheme?
+          java-version: '21'
+          distribution: 'graalvm'
           components: 'native-image'
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Running test
@@ -143,7 +173,6 @@ jobs:
           echo "GRAALVM_HOME: $GRAALVM_HOME"
           echo "JAVA_HOME: $JAVA_HOME"
           java --version
-          gu --version
           native-image --version
           ./gradlew nativeTest
 
@@ -157,5 +186,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - if: needs.build.result != 'success'
+      - if: |
+          needs.build.result != 'success' ||
+          needs.build-graal.result != 'success'
         run: exit 1

@@ -7,12 +7,14 @@ package io.opentelemetry.sdk.metrics.internal.aggregator;
 
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.assertThat;
 
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.TraceFlags;
 import io.opentelemetry.api.trace.TraceState;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.metrics.InstrumentType;
 import io.opentelemetry.sdk.metrics.InstrumentValueType;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
@@ -21,6 +23,8 @@ import io.opentelemetry.sdk.metrics.data.LongPointData;
 import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableLongExemplarData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableLongPointData;
+import io.opentelemetry.sdk.metrics.internal.data.MutableLongPointData;
+import io.opentelemetry.sdk.metrics.internal.descriptor.Advice;
 import io.opentelemetry.sdk.metrics.internal.descriptor.InstrumentDescriptor;
 import io.opentelemetry.sdk.metrics.internal.descriptor.MetricDescriptor;
 import io.opentelemetry.sdk.metrics.internal.exemplar.ExemplarReservoir;
@@ -29,6 +33,8 @@ import java.util.Collections;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -43,23 +49,33 @@ class LongSumAggregatorTest {
   private static final InstrumentationScopeInfo library = InstrumentationScopeInfo.empty();
   private static final MetricDescriptor metricDescriptor =
       MetricDescriptor.create("name", "description", "unit");
-  private static final LongSumAggregator aggregator =
-      new LongSumAggregator(
-          InstrumentDescriptor.create(
-              "instrument_name",
-              "instrument_description",
-              "instrument_unit",
-              InstrumentType.COUNTER,
-              InstrumentValueType.LONG),
-          ExemplarReservoir::longNoSamples);
+  private LongSumAggregator aggregator;
 
-  @Test
-  void createHandle() {
+  private void init(MemoryMode memoryMode) {
+    aggregator =
+        new LongSumAggregator(
+            InstrumentDescriptor.create(
+                "instrument_name",
+                "instrument_description",
+                "instrument_unit",
+                InstrumentType.COUNTER,
+                InstrumentValueType.LONG,
+                Advice.empty()),
+            ExemplarReservoir::longNoSamples,
+            memoryMode);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void createHandle(MemoryMode memoryMode) {
+    init(memoryMode);
     assertThat(aggregator.createHandle()).isInstanceOf(LongSumAggregator.Handle.class);
   }
 
-  @Test
-  void multipleRecords() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void multipleRecords(MemoryMode memoryMode) {
+    init(memoryMode);
     AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
     aggregatorHandle.recordLong(12);
     aggregatorHandle.recordLong(12);
@@ -73,8 +89,10 @@ class LongSumAggregatorTest {
         .isEqualTo(12 * 5);
   }
 
-  @Test
-  void multipleRecords_WithNegatives() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void multipleRecords_WithNegatives(MemoryMode memoryMode) {
+    init(memoryMode);
     AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
     aggregatorHandle.recordLong(12);
     aggregatorHandle.recordLong(12);
@@ -89,8 +107,10 @@ class LongSumAggregatorTest {
         .isEqualTo(14);
   }
 
-  @Test
-  void aggregateThenMaybeReset() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void aggregateThenMaybeReset(MemoryMode memoryMode) {
+    init(memoryMode);
     AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
 
     aggregatorHandle.recordLong(13);
@@ -110,8 +130,9 @@ class LongSumAggregatorTest {
         .isEqualTo(-13);
   }
 
-  @Test
-  void aggregateThenMaybeReset_WithExemplars() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void aggregateThenMaybeReset_WithExemplars(MemoryMode memoryMode) {
     Attributes attributes = Attributes.builder().put("test", "value").build();
     LongExemplarData exemplar =
         ImmutableLongExemplarData.create(
@@ -132,8 +153,10 @@ class LongSumAggregatorTest {
                 "instrument_description",
                 "instrument_unit",
                 InstrumentType.COUNTER,
-                InstrumentValueType.LONG),
-            () -> reservoir);
+                InstrumentValueType.LONG,
+                Advice.empty()),
+            () -> reservoir,
+            memoryMode);
     AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
     aggregatorHandle.recordLong(0, attributes, Context.root());
     assertThat(
@@ -141,8 +164,9 @@ class LongSumAggregatorTest {
         .isEqualTo(ImmutableLongPointData.create(0, 1, Attributes.empty(), 0, exemplars));
   }
 
-  @Test
-  void mergeAndDiff() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void mergeAndDiff(MemoryMode memoryMode) {
     LongExemplarData exemplar =
         ImmutableLongExemplarData.create(
             Attributes.empty(),
@@ -159,8 +183,14 @@ class LongSumAggregatorTest {
         LongSumAggregator aggregator =
             new LongSumAggregator(
                 InstrumentDescriptor.create(
-                    "name", "description", "unit", instrumentType, InstrumentValueType.LONG),
-                ExemplarReservoir::longNoSamples);
+                    "name",
+                    "description",
+                    "unit",
+                    instrumentType,
+                    InstrumentValueType.LONG,
+                    Advice.empty()),
+                ExemplarReservoir::longNoSamples,
+                memoryMode);
 
         LongPointData diffed =
             aggregator.diff(
@@ -176,9 +206,99 @@ class LongSumAggregatorTest {
     }
   }
 
-  @Test
-  @SuppressWarnings("unchecked")
-  void toMetricData() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void diffInPlace(MemoryMode memoryMode) {
+    init(memoryMode);
+    Attributes attributes = Attributes.builder().put("test", "value").build();
+    LongExemplarData exemplar =
+        ImmutableLongExemplarData.create(
+            attributes,
+            2L,
+            SpanContext.create(
+                "00000000000000000000000000000001",
+                "0000000000000002",
+                TraceFlags.getDefault(),
+                TraceState.getDefault()),
+            1);
+    List<LongExemplarData> exemplars = Collections.singletonList(exemplar);
+    List<LongExemplarData> previousExemplars =
+        Collections.singletonList(
+            ImmutableLongExemplarData.create(
+                attributes,
+                1L,
+                SpanContext.create(
+                    "00000000000000000000000000000001",
+                    "0000000000000002",
+                    TraceFlags.getDefault(),
+                    TraceState.getDefault()),
+                2));
+
+    MutableLongPointData previous = new MutableLongPointData();
+    MutableLongPointData current = new MutableLongPointData();
+
+    previous.set(0, 1, Attributes.empty(), 1, previousExemplars);
+    current.set(0, 1, Attributes.empty(), 3, exemplars);
+
+    aggregator.diffInPlace(previous, current);
+
+    /* Assert that latest measurement is kept and set on {@code previous} */
+    assertThat(previous.getStartEpochNanos()).isEqualTo(current.getStartEpochNanos());
+    assertThat(previous.getEpochNanos()).isEqualTo(current.getEpochNanos());
+    assertThat(previous.getAttributes()).isEqualTo(current.getAttributes());
+    assertThat(previous.getValue()).isEqualTo(2);
+    assertThat(previous.getExemplars()).isEqualTo(current.getExemplars());
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void copyPoint(MemoryMode memoryMode) {
+    init(memoryMode);
+    MutableLongPointData pointData = (MutableLongPointData) aggregator.createReusablePoint();
+
+    Attributes attributes = Attributes.of(AttributeKey.longKey("test"), 100L);
+    List<LongExemplarData> examplarsFrom =
+        Collections.singletonList(
+            ImmutableLongExemplarData.create(
+                attributes,
+                2L,
+                SpanContext.create(
+                    "00000000000000000000000000000001",
+                    "0000000000000002",
+                    TraceFlags.getDefault(),
+                    TraceState.getDefault()),
+                1));
+    pointData.set(0, 1, attributes, 2000, examplarsFrom);
+
+    MutableLongPointData toPointData = (MutableLongPointData) aggregator.createReusablePoint();
+
+    Attributes toAttributes = Attributes.of(AttributeKey.longKey("test"), 100L);
+    List<LongExemplarData> examplarsTo =
+        Collections.singletonList(
+            ImmutableLongExemplarData.create(
+                attributes,
+                4L,
+                SpanContext.create(
+                    "00000000000000000000000000000001",
+                    "0000000000000002",
+                    TraceFlags.getDefault(),
+                    TraceState.getDefault()),
+                2));
+    toPointData.set(0, 2, toAttributes, 4000, examplarsTo);
+
+    aggregator.copyPoint(pointData, toPointData);
+
+    assertThat(toPointData.getStartEpochNanos()).isEqualTo(pointData.getStartEpochNanos());
+    assertThat(toPointData.getEpochNanos()).isEqualTo(pointData.getEpochNanos());
+    assertThat(toPointData.getAttributes()).isEqualTo(pointData.getAttributes());
+    assertThat(toPointData.getValue()).isEqualTo(pointData.getValue());
+    assertThat(toPointData.getExemplars()).isEqualTo(pointData.getExemplars());
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void toMetricData(MemoryMode memoryMode) {
+    init(memoryMode);
     AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
     aggregatorHandle.recordLong(10);
 
@@ -208,8 +328,10 @@ class LongSumAggregatorTest {
                                 .hasValue(10)));
   }
 
-  @Test
-  void toMetricDataWithExemplars() {
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void toMetricDataWithExemplars(MemoryMode memoryMode) {
+    init(memoryMode);
     Attributes attributes = Attributes.builder().put("test", "value").build();
     LongExemplarData exemplar =
         ImmutableLongExemplarData.create(
@@ -233,5 +355,22 @@ class LongSumAggregatorTest {
                 AggregationTemporality.CUMULATIVE))
         .hasLongSumSatisfying(
             sum -> sum.hasPointsSatisfying(point -> point.hasValue(1).hasExemplars(exemplar)));
+  }
+
+  @Test
+  void sameObjectReturnedOnReusableDataMemoryMode() {
+    init(MemoryMode.REUSABLE_DATA);
+    AggregatorHandle<LongPointData, LongExemplarData> aggregatorHandle = aggregator.createHandle();
+
+    aggregatorHandle.recordLong(1L);
+    LongPointData firstCollection =
+        aggregatorHandle.aggregateThenMaybeReset(0, 1, Attributes.empty(), /* reset= */ false);
+
+    aggregatorHandle.recordLong(1L);
+    LongPointData secondCollection =
+        aggregatorHandle.aggregateThenMaybeReset(0, 1, Attributes.empty(), /* reset= */ false);
+
+    // Should be same object since we are in REUSABLE_DATA mode.
+    assertThat(firstCollection).isSameAs(secondCollection);
   }
 }

@@ -7,6 +7,7 @@ package io.opentelemetry.exporter.logging;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
+import io.opentelemetry.api.common.Value;
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
@@ -63,15 +64,16 @@ public class SystemOutLogRecordExporter implements LogRecordExporter {
   // VisibleForTesting
   static void formatLog(StringBuilder stringBuilder, LogRecordData log) {
     InstrumentationScopeInfo instrumentationScopeInfo = log.getInstrumentationScopeInfo();
+    Value<?> body = log.getBodyValue();
     stringBuilder
         .append(
             ISO_FORMAT.format(
-                Instant.ofEpochMilli(NANOSECONDS.toMillis(log.getEpochNanos()))
+                Instant.ofEpochMilli(NANOSECONDS.toMillis(log.getTimestampEpochNanos()))
                     .atZone(ZoneOffset.UTC)))
         .append(" ")
         .append(log.getSeverity())
         .append(" '")
-        .append(log.getBody().asString())
+        .append(body == null ? "" : body.asString())
         .append("' : ")
         .append(log.getSpanContext().getTraceId())
         .append(" ")
@@ -94,5 +96,10 @@ public class SystemOutLogRecordExporter implements LogRecordExporter {
       return CompletableResultCode.ofSuccess();
     }
     return CompletableResultCode.ofSuccess();
+  }
+
+  @Override
+  public String toString() {
+    return "SystemOutLogRecordExporter{}";
   }
 }

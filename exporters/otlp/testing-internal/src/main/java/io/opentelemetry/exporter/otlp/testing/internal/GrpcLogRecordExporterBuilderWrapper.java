@@ -6,12 +6,17 @@
 package io.opentelemetry.exporter.otlp.testing.internal;
 
 import io.grpc.ManagedChannel;
-import io.opentelemetry.exporter.internal.retry.RetryPolicy;
-import io.opentelemetry.exporter.internal.retry.RetryUtil;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
+import io.opentelemetry.sdk.common.export.ProxyOptions;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.X509TrustManager;
 
 final class GrpcLogRecordExporterBuilderWrapper implements TelemetryExporterBuilder<LogRecordData> {
   private final OtlpGrpcLogRecordExporterBuilder builder;
@@ -39,6 +44,18 @@ final class GrpcLogRecordExporterBuilderWrapper implements TelemetryExporterBuil
   }
 
   @Override
+  public TelemetryExporterBuilder<LogRecordData> setConnectTimeout(long timeout, TimeUnit unit) {
+    builder.setConnectTimeout(timeout, unit);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<LogRecordData> setConnectTimeout(Duration timeout) {
+    builder.setConnectTimeout(timeout);
+    return this;
+  }
+
+  @Override
   public TelemetryExporterBuilder<LogRecordData> setCompression(String compression) {
     builder.setCompression(compression);
     return this;
@@ -47,6 +64,13 @@ final class GrpcLogRecordExporterBuilderWrapper implements TelemetryExporterBuil
   @Override
   public TelemetryExporterBuilder<LogRecordData> addHeader(String key, String value) {
     builder.addHeader(key, value);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<LogRecordData> setHeaders(
+      Supplier<Map<String, String>> headerSupplier) {
+    builder.setHeaders(headerSupplier);
     return this;
   }
 
@@ -64,15 +88,27 @@ final class GrpcLogRecordExporterBuilderWrapper implements TelemetryExporterBuil
   }
 
   @Override
-  public TelemetryExporterBuilder<LogRecordData> setRetryPolicy(RetryPolicy retryPolicy) {
-    RetryUtil.setRetryPolicyOnDelegate(builder, retryPolicy);
+  public TelemetryExporterBuilder<LogRecordData> setSslContext(
+      SSLContext sslContext, X509TrustManager trustManager) {
+    builder.setSslContext(sslContext, trustManager);
     return this;
   }
 
   @Override
+  public TelemetryExporterBuilder<LogRecordData> setRetryPolicy(@Nullable RetryPolicy retryPolicy) {
+    builder.setRetryPolicy(retryPolicy);
+    return this;
+  }
+
+  @Override
+  public TelemetryExporterBuilder<LogRecordData> setProxyOptions(ProxyOptions proxyOptions) {
+    throw new UnsupportedOperationException("ProxyOptions are not supported for gRPC");
+  }
+
+  @Override
   @SuppressWarnings("deprecation") // testing deprecated functionality
-  public TelemetryExporterBuilder<LogRecordData> setChannel(ManagedChannel channel) {
-    builder.setChannel(channel);
+  public TelemetryExporterBuilder<LogRecordData> setChannel(Object channel) {
+    builder.setChannel((ManagedChannel) channel);
     return this;
   }
 

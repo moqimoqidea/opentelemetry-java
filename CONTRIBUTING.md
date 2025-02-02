@@ -3,12 +3,12 @@
 Welcome to OpenTelemetry Java repository!
 
 Before you start - see OpenTelemetry general
-[contributing](https://github.com/open-telemetry/community/blob/main/CONTRIBUTING.md)
+[contributing](https://github.com/open-telemetry/community/blob/main/guides/contributor/README.md)
 requirements and recommendations.
 
 If you want to add new features or change behavior, please make sure your changes follow the
 [OpenTelemetry Specification](https://github.com/open-telemetry/opentelemetry-specification).
-Otherwise file an issue or submit a PR to the specification repo first.
+Otherwise, file an issue or submit a pull request (PR) to the specification repo first.
 
 Make sure to review the projects [license](LICENSE) and sign the
 [CNCF CLA](https://identity.linuxfoundation.org/projects/cncf). A signed CLA will be enforced by an
@@ -16,7 +16,7 @@ automatic check once you submit a PR, but you can also sign it after opening you
 
 ## Requirements
 
-Java 11 or higher is required to build the projects in this repository. The built artifacts can be
+Java 17 or higher is required to build the projects in this repository. The built artifacts can be
 used on Java 8 or higher.
 
 ## Building opentelemetry-java
@@ -52,13 +52,22 @@ $ ./gradlew check
 
 Note: this gradle task will potentially generate changes to files in
 the `docs/apidiffs/current_vs_latest`
-directory. Please make sure to include any changes to these files in your pull request.
+directory. Please make sure to include any changes to these files in your pull request (i.e.
+add those files to your commits in the PR).
 
 ## PR Review
 
 After you submit a PR, it will be reviewed by the project maintainers and approvers. Not all
 maintainers need to review a particular PR, but merging to the base branch is authorized to
 restricted members (administrators).
+
+### Draft PRs
+
+Draft PRs are welcome, especially when exploring new ideas or experimenting with a hypothesis.
+However, draft PRs may not receive the same degree of attention, feedback, or scrutiny unless
+requested directly. In order to help keep the PR backlog maintainable, drafts older than 6 months
+will be closed by the project maintainers. This should not be interpreted as a rejection. Closed
+PRs may be reopened by the author when time or interest allows.
 
 ## Project Scope
 
@@ -69,15 +78,13 @@ which implement concepts defined in
 the [opentelemetry-specification](https://github.com/open-telemetry/opentelemetry-specification),
 with a few exceptions / comments:
 
-* The [API incubator](./extensions/incubator) and [SDK incubator](./extensions/incubator)
+* The [API incubator](./api/incubator) and [SDK incubator](./sdk-extensions/incubator)
   contain prototypes which have been discussed in the specification
   or [oteps](https://github.com/open-telemetry/oteps) and have a reasonable chance of becoming part
   of the specification, subject to maintainers' discretion.
 * Components like the [Kotlin Extension](./extensions/kotlin) are included which are required for
   the API / SDK to function in key areas of the Java ecosystem. Inclusion is subject to maintainers'
   discretion.
-* The [semconv](./semconv) module contains generated classes representing
-  the [semantic conventions](https://github.com/open-telemetry/opentelemetry-specification/tree/main/semantic_conventions).
 * As a general rule, components which implement semantic conventions belong elsewhere.
 
 Other repositories in the OpenTelemetry Java ecosystem include:
@@ -86,7 +93,7 @@ Other repositories in the OpenTelemetry Java ecosystem include:
   contains instrumentation.
 * [opentelemetry-java-contrib](https://github.com/open-telemetry/opentelemetry-java-contrib)
   contains extensions, prototypes, and instrumentation, including vendor specific components.
-* [opentelemetry-java-docs](https://github.com/open-telemetry/opentelemetry-java-docs) contains
+* [opentelemetry-java-examples](https://github.com/open-telemetry/opentelemetry-java-examples) contains
   working code snippets demonstrating various concepts.
 
 ## Style guideline
@@ -131,6 +138,21 @@ uses [google-java-format](https://github.com/google/google-java-format) library:
 * Adding `toString()` overrides on classes is encouraged, but we only use `toString()` to provide
   debugging assistance. The implementations of all `toString()` methods should be considered to be
   unstable unless explicitly documented otherwise.
+* Avoid synchronizing using a class's intrinsic lock. Instead, synchronize on a dedicated lock object. E.g:
+  ```java
+  private final Object lock = new Object();
+
+  public void doSomething() {
+    synchronized (lock) { ... }
+  }
+  ```
+* Don't
+  use [gradle test fixtures](https://docs.gradle.org/current/userguide/java_testing.html#sec:java_test_fixtures) (
+  i.e. `java-test-fixtures` plugin) to reuse code for internal testing. The test fixtures plugin has
+  side effects where test dependencies are added to the `pom.xml` and publishes an
+  extra `*-test-fixtures.jar` artifact which is unnecessary for internal testing. Instead, create a
+  new `*:testing-internal` module and omit the `otel.java-conventions`. For example,
+  see [/exporters/otlp/testing-internal](./exporters/otlp/testing-internal).
 
 If you notice any practice being applied in the project consistently that isn't listed here, please
 consider a pull request to add it.
@@ -167,6 +189,11 @@ in the guide for exceptions to the Javadoc requirement.
 * We do not use `@author` tags in our javadoc.
 * Our javadoc is available via [
   javadoc.io}(https://javadoc.io/doc/io.opentelemetry/opentelemetry-api)
+
+### SDK Configuration Documentation
+
+All changes to the SDK configuration options or autoconfigure module should be documented on
+[opentelemetry.io](https://opentelemetry.io/docs/languages/java/configuration/).
 
 ### AutoValue
 
@@ -230,13 +257,18 @@ Example usage could be as follows:
    }
    ```
 
+   Please confirm whether the local opentelemetry-java version is consistent with the
+   opentelemetry-java version declared in the project that relies on opentelemetry-java.
+   If it is inconsistent, `dependencySubstitution` may not take effect.
+
    See [the Gradle documentation](https://docs.gradle.org/current/userguide/composite_builds.html#included_build_declaring_substitutions)
    for more information.
-
 4. If you now build your project, it will use the included build to supply the opentelemetry-java
    artifacts, ignoring any version declarations. Use the prefix `:DIRECTORY:` to refer to
    tasks/projects within the included build, where DIRECTORY is the name of the directory in the
    included build (only the part after the last `/`).
+5. Here are some issues and solutions ([discussions/6551](https://github.com/open-telemetry/opentelemetry-java/discussions/6551))
+   you may encounter that may be helpful to you.
 
 ### Updating the OTLP protobufs
 

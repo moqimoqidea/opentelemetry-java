@@ -12,11 +12,15 @@ import io.opentelemetry.api.metrics.MeterProvider;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
-/** Builder class for {@link BatchLogRecordProcessor}. */
+/**
+ * Builder class for {@link BatchLogRecordProcessor}.
+ *
+ * @since 1.27.0
+ */
 public final class BatchLogRecordProcessorBuilder {
 
   // Visible for testing
-  static final long DEFAULT_SCHEDULE_DELAY_MILLIS = 200;
+  static final long DEFAULT_SCHEDULE_DELAY_MILLIS = 1000;
   // Visible for testing
   static final int DEFAULT_MAX_QUEUE_SIZE = 2048;
   // Visible for testing
@@ -67,7 +71,7 @@ public final class BatchLogRecordProcessorBuilder {
   public BatchLogRecordProcessorBuilder setExporterTimeout(long timeout, TimeUnit unit) {
     requireNonNull(unit, "unit");
     checkArgument(timeout >= 0, "timeout must be non-negative");
-    exporterTimeoutNanos = unit.toNanos(timeout);
+    exporterTimeoutNanos = timeout == 0 ? Long.MAX_VALUE : unit.toNanos(timeout);
     return this;
   }
 
@@ -94,9 +98,11 @@ public final class BatchLogRecordProcessorBuilder {
    * @param maxQueueSize the maximum number of Logs that are kept in the queue before start
    *     dropping.
    * @return this.
+   * @throws IllegalArgumentException if {@code maxQueueSize} is not positive.
    * @see BatchLogRecordProcessorBuilder#DEFAULT_MAX_QUEUE_SIZE
    */
   public BatchLogRecordProcessorBuilder setMaxQueueSize(int maxQueueSize) {
+    checkArgument(maxQueueSize > 0, "maxQueueSize must be positive.");
     this.maxQueueSize = maxQueueSize;
     return this;
   }

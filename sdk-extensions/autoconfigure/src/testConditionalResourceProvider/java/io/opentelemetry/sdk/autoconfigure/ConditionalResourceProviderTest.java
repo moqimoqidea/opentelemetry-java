@@ -5,37 +5,31 @@
 
 package io.opentelemetry.sdk.autoconfigure;
 
+import static io.opentelemetry.api.common.AttributeKey.stringKey;
 import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.entry;
 
-import io.opentelemetry.semconv.resource.attributes.ResourceAttributes;
 import org.junit.jupiter.api.Test;
 
 class ConditionalResourceProviderTest {
 
   @Test
   void shouldConditionallyProvideResourceAttributes_skipBasedOnPreviousResource() {
-    AutoConfiguredOpenTelemetrySdk sdk =
-        AutoConfiguredOpenTelemetrySdk.builder()
-            .setResultAsGlobal(false)
-            .registerShutdownHook(false)
-            .build();
+    AutoConfiguredOpenTelemetrySdk sdk = AutoConfiguredOpenTelemetrySdk.builder().build();
 
     assertThat(sdk.getResource().getAttributes().asMap())
-        .contains(entry(ResourceAttributes.SERVICE_NAME, "test-service"));
+        .contains(entry(stringKey("service.name"), "test-service"));
   }
 
   @Test
   void shouldConditionallyProvideResourceAttributes_skipBasedOnConfig() {
     AutoConfiguredOpenTelemetrySdk sdk =
         AutoConfiguredOpenTelemetrySdk.builder()
-            .setResultAsGlobal(false)
-            .registerShutdownHook(false)
             .addPropertiesSupplier(() -> singletonMap("skip-first-resource-provider", "true"))
             .build();
 
     assertThat(sdk.getResource().getAttributes().asMap())
-        .contains(entry(ResourceAttributes.SERVICE_NAME, "test-service-2"));
+        .contains(entry(stringKey("service.name"), "test-service-2"));
   }
 }

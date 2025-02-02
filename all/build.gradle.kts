@@ -8,10 +8,11 @@ otelJava.moduleName.set("io.opentelemetry.all")
 tasks {
   // We don't compile much here, just some API boundary tests. This project is mostly for
   // aggregating jacoco reports and it doesn't work if this isn't at least as high as the
-  // highest supported Java version in any of our projects. All of our projects target
-  // Java 8.
+  // highest supported Java version in any of our projects. All of our
+  // projects target Java 8 except :exporters:http-sender:jdk, which targets
+  // Java 11
   withType(JavaCompile::class) {
-    options.release.set(8)
+    options.release.set(11)
   }
 
   val testJavaVersion: String? by project
@@ -20,6 +21,11 @@ tasks {
       enabled = false
     }
   }
+}
+
+// Skip OWASP dependencyCheck task on test module
+dependencyCheck {
+  skip = true
 }
 
 val testTasks = mutableListOf<Task>()
@@ -38,19 +44,6 @@ dependencies {
       }
     }
   }
-
-  // For testing BOM references to artifacts that were previously published
-  testImplementation(platform(project(":bom")))
-  // The io.grpc.grpc-* dependencies are transitive dependencies of opentelemetry-exporter-jaeger-proto
-  // which must be provided by the user
-  testImplementation("io.opentelemetry:opentelemetry-exporter-jaeger-proto")
-  testImplementation("io.grpc:grpc-api")
-  testImplementation("io.grpc:grpc-protobuf")
-  testImplementation("io.grpc:grpc-stub")
-  testImplementation("io.opentelemetry:opentelemetry-extension-annotations")
-  testImplementation("io.opentelemetry:opentelemetry-extension-aws")
-  testImplementation("io.opentelemetry:opentelemetry-sdk-extension-resources")
-  testImplementation("io.opentelemetry:opentelemetry-sdk-extension-aws")
 
   testImplementation("com.tngtech.archunit:archunit-junit5")
 }
@@ -92,11 +85,7 @@ tasks.named<JacocoReport>("jacocoTestReport") {
         // Exclude mrjar (jacoco complains), shaded, and generated code
         !it.absolutePath.contains("META-INF/versions/") &&
           !it.absolutePath.contains("/internal/shaded/") &&
-          !it.absolutePath.contains("io/opentelemetry/proto/") &&
-          !it.absolutePath.contains("io/opentelemetry/exporter/jaeger/proto/") &&
-          !it.absolutePath.contains("io/opentelemetry/exporter/jaeger/internal/protobuf/") &&
           !it.absolutePath.contains("io/opentelemetry/sdk/extension/trace/jaeger/proto/") &&
-          !it.absolutePath.contains("io/opentelemetry/semconv/trace/attributes/") &&
           !it.absolutePath.contains("AutoValue_")
       },
     )

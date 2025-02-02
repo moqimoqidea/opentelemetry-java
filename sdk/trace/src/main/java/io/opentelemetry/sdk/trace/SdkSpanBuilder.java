@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
 /** {@link SdkSpanBuilder} is SDK implementation of {@link SpanBuilder}. */
-final class SdkSpanBuilder implements SpanBuilder {
+class SdkSpanBuilder implements SpanBuilder {
 
   private final String spanName;
   private final InstrumentationScopeInfo instrumentationScopeInfo;
@@ -179,8 +179,9 @@ final class SdkSpanBuilder implements SpanBuilder {
       // New child span.
       traceId = parentSpanContext.getTraceId();
     }
+    List<LinkData> currentLinks = links;
     List<LinkData> immutableLinks =
-        links == null ? Collections.emptyList() : Collections.unmodifiableList(links);
+        currentLinks == null ? Collections.emptyList() : Collections.unmodifiableList(currentLinks);
     // Avoid any possibility to modify the links list by adding links to the Builder after the
     // startSpan is called. If that happens all the links will be added in a new list.
     links = null;
@@ -228,7 +229,7 @@ final class SdkSpanBuilder implements SpanBuilder {
         tracerSharedState.getClock(),
         tracerSharedState.getResource(),
         recordedAttributes,
-        immutableLinks,
+        currentLinks,
         totalNumberOfLinksAdded,
         startEpochNanos);
   }

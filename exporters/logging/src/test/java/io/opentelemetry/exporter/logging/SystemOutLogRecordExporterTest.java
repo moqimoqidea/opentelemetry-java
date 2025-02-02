@@ -61,6 +61,12 @@ class SystemOutLogRecordExporterTest {
     assertThat(exporter.shutdown().isSuccess()).isTrue();
   }
 
+  @Test
+  void stringRepresentation() {
+    assertThat(SystemOutLogRecordExporter.create().toString())
+        .isEqualTo("SystemOutLogRecordExporter{}");
+  }
+
   private static LogRecordData sampleLog(long timestamp) {
     return TestLogRecordData.builder()
         .setResource(Resource.empty())
@@ -69,7 +75,7 @@ class SystemOutLogRecordExporterTest {
         .setAttributes(Attributes.of(stringKey("cheese"), "cheddar", longKey("amount"), 1L))
         .setBody("message")
         .setSeverity(Severity.ERROR3)
-        .setEpoch(timestamp, TimeUnit.MILLISECONDS)
+        .setTimestamp(timestamp, TimeUnit.MILLISECONDS)
         .setSpanContext(
             SpanContext.create(
                 "00000000000000010000000000000002",

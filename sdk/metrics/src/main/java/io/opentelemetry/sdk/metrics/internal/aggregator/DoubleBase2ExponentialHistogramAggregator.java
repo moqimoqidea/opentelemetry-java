@@ -5,25 +5,26 @@
 
 package io.opentelemetry.sdk.metrics.internal.aggregator;
 
-import com.google.auto.value.AutoValue;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.common.export.MemoryMode;
+import io.opentelemetry.sdk.internal.DynamicPrimitiveLongList;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
 import io.opentelemetry.sdk.metrics.data.DoubleExemplarData;
 import io.opentelemetry.sdk.metrics.data.ExponentialHistogramBuckets;
 import io.opentelemetry.sdk.metrics.data.ExponentialHistogramPointData;
 import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.metrics.internal.data.EmptyExponentialHistogramBuckets;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableExponentialHistogramData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableExponentialHistogramPointData;
 import io.opentelemetry.sdk.metrics.internal.data.ImmutableMetricData;
+import io.opentelemetry.sdk.metrics.internal.data.MutableExponentialHistogramBuckets;
+import io.opentelemetry.sdk.metrics.internal.data.MutableExponentialHistogramPointData;
 import io.opentelemetry.sdk.metrics.internal.descriptor.MetricDescriptor;
 import io.opentelemetry.sdk.metrics.internal.exemplar.ExemplarReservoir;
 import io.opentelemetry.sdk.resources.Resource;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
@@ -39,6 +40,7 @@ public final class DoubleBase2ExponentialHistogramAggregator
   private final Supplier<ExemplarReservoir<DoubleExemplarData>> reservoirSupplier;
   private final int maxBuckets;
   private final int maxScale;
+  private final MemoryMode memoryMode;
 
   /**
    * Constructs an exponential histogram aggregator.
@@ -48,15 +50,17 @@ public final class DoubleBase2ExponentialHistogramAggregator
   public DoubleBase2ExponentialHistogramAggregator(
       Supplier<ExemplarReservoir<DoubleExemplarData>> reservoirSupplier,
       int maxBuckets,
-      int maxScale) {
+      int maxScale,
+      MemoryMode memoryMode) {
     this.reservoirSupplier = reservoirSupplier;
     this.maxBuckets = maxBuckets;
     this.maxScale = maxScale;
+    this.memoryMode = memoryMode;
   }
 
   @Override
   public AggregatorHandle<ExponentialHistogramPointData, DoubleExemplarData> createHandle() {
-    return new Handle(reservoirSupplier.get(), maxBuckets, maxScale);
+    return new Handle(reservoirSupplier.get(), maxBuckets, maxScale, memoryMode);
   }
 
   @Override
@@ -78,6 +82,7 @@ public final class DoubleBase2ExponentialHistogramAggregator
   static final class Handle
       extends AggregatorHandle<ExponentialHistogramPointData, DoubleExemplarData> {
     private final int maxBuckets;
+    private final int maxScale;
     @Nullable private DoubleBase2ExponentialHistogramBuckets positiveBuckets;
     @Nullable private DoubleBase2ExponentialHistogramBuckets negativeBuckets;
     private long zeroCount;
@@ -85,17 +90,31 @@ public final class DoubleBase2ExponentialHistogramAggregator
     private double min;
     private double max;
     private long count;
-    private int scale;
+    private int currentScale;
+    private final MemoryMode memoryMode;
 
-    Handle(ExemplarReservoir<DoubleExemplarData> reservoir, int maxBuckets, int maxScale) {
+    // Used only when MemoryMode = REUSABLE_DATA
+    @Nullable private final MutableExponentialHistogramPointData reusablePoint;
+
+    Handle(
+        ExemplarReservoir<DoubleExemplarData> reservoir,
+        int maxBuckets,
+        int maxScale,
+        MemoryMode memoryMode) {
       super(reservoir);
       this.maxBuckets = maxBuckets;
+      this.maxScale = maxScale;
       this.sum = 0;
       this.zeroCount = 0;
       this.min = Double.MAX_VALUE;
       this.max = -1;
       this.count = 0;
-      this.scale = maxScale;
+      this.currentScale = maxScale;
+      this.reusablePoint =
+          (memoryMode == MemoryMode.REUSABLE_DATA)
+              ? new MutableExponentialHistogramPointData()
+              : null;
+      this.memoryMode = memoryMode;
     }
 
     @Override
@@ -105,39 +124,92 @@ public final class DoubleBase2ExponentialHistogramAggregator
         Attributes attributes,
         List<DoubleExemplarData> exemplars,
         boolean reset) {
-      ExponentialHistogramPointData point =
-          ImmutableExponentialHistogramPointData.create(
-              scale,
-              sum,
-              zeroCount,
-              this.count > 0,
-              this.min,
-              this.count > 0,
-              this.max,
-              resolveBuckets(this.positiveBuckets, scale, reset),
-              resolveBuckets(this.negativeBuckets, scale, reset),
-              startEpochNanos,
-              epochNanos,
-              attributes,
-              exemplars);
+
+      ExponentialHistogramPointData point;
+      if (reusablePoint == null) {
+        point =
+            ImmutableExponentialHistogramPointData.create(
+                currentScale,
+                sum,
+                zeroCount,
+                this.count > 0,
+                this.min,
+                this.count > 0,
+                this.max,
+                resolveBuckets(
+                    this.positiveBuckets, currentScale, reset, /* reusableBuckets= */ null),
+                resolveBuckets(
+                    this.negativeBuckets, currentScale, reset, /* reusableBuckets= */ null),
+                startEpochNanos,
+                epochNanos,
+                attributes,
+                exemplars);
+      } else /* REUSABLE_DATA */ {
+        point =
+            reusablePoint.set(
+                currentScale,
+                sum,
+                zeroCount,
+                this.count > 0,
+                this.min,
+                this.count > 0,
+                this.max,
+                resolveBuckets(
+                    this.positiveBuckets, currentScale, reset, reusablePoint.getPositiveBuckets()),
+                resolveBuckets(
+                    this.negativeBuckets, currentScale, reset, reusablePoint.getNegativeBuckets()),
+                startEpochNanos,
+                epochNanos,
+                attributes,
+                exemplars);
+      }
+
       if (reset) {
         this.sum = 0;
         this.zeroCount = 0;
         this.min = Double.MAX_VALUE;
         this.max = -1;
         this.count = 0;
+        this.currentScale = maxScale;
       }
       return point;
     }
 
-    private static ExponentialHistogramBuckets resolveBuckets(
-        @Nullable DoubleBase2ExponentialHistogramBuckets buckets, int scale, boolean reset) {
+    private ExponentialHistogramBuckets resolveBuckets(
+        @Nullable DoubleBase2ExponentialHistogramBuckets buckets,
+        int scale,
+        boolean reset,
+        @Nullable ExponentialHistogramBuckets reusableBuckets) {
       if (buckets == null) {
         return EmptyExponentialHistogramBuckets.get(scale);
       }
-      ExponentialHistogramBuckets copy = buckets.copy();
+
+      ExponentialHistogramBuckets copy;
+      if (reusableBuckets == null) {
+        copy = buckets.copy();
+      } else {
+        MutableExponentialHistogramBuckets mutableExponentialHistogramBuckets;
+        if (reusableBuckets instanceof MutableExponentialHistogramBuckets) {
+          mutableExponentialHistogramBuckets = (MutableExponentialHistogramBuckets) reusableBuckets;
+        } else /* EmptyExponentialHistogramBuckets */ {
+          mutableExponentialHistogramBuckets = new MutableExponentialHistogramBuckets();
+        }
+
+        DynamicPrimitiveLongList reusableBucketCountsList =
+            mutableExponentialHistogramBuckets.getReusableBucketCountsList();
+        buckets.getBucketCountsIntoReusableList(reusableBucketCountsList);
+
+        mutableExponentialHistogramBuckets.set(
+            buckets.getScale(),
+            buckets.getOffset(),
+            buckets.getTotalCount(),
+            reusableBucketCountsList);
+
+        copy = mutableExponentialHistogramBuckets;
+      }
+
       if (reset) {
-        buckets.clear();
+        buckets.clear(maxScale);
       }
       return copy;
     }
@@ -163,13 +235,15 @@ public final class DoubleBase2ExponentialHistogramAggregator
       } else if (c > 0) {
         // Initialize positive buckets at current scale, if needed
         if (positiveBuckets == null) {
-          positiveBuckets = new DoubleBase2ExponentialHistogramBuckets(scale, maxBuckets);
+          positiveBuckets =
+              new DoubleBase2ExponentialHistogramBuckets(currentScale, maxBuckets, memoryMode);
         }
         buckets = positiveBuckets;
       } else {
         // Initialize negative buckets at current scale, if needed
         if (negativeBuckets == null) {
-          negativeBuckets = new DoubleBase2ExponentialHistogramBuckets(scale, maxBuckets);
+          negativeBuckets =
+              new DoubleBase2ExponentialHistogramBuckets(currentScale, maxBuckets, memoryMode);
         }
         buckets = negativeBuckets;
       }
@@ -195,29 +269,12 @@ public final class DoubleBase2ExponentialHistogramAggregator
     void downScale(int by) {
       if (positiveBuckets != null) {
         positiveBuckets.downscale(by);
-        scale = positiveBuckets.getScale();
+        currentScale = positiveBuckets.getScale();
       }
       if (negativeBuckets != null) {
         negativeBuckets.downscale(by);
-        scale = negativeBuckets.getScale();
+        currentScale = negativeBuckets.getScale();
       }
-    }
-  }
-
-  @AutoValue
-  abstract static class EmptyExponentialHistogramBuckets implements ExponentialHistogramBuckets {
-
-    private static final Map<Integer, ExponentialHistogramBuckets> ZERO_BUCKETS =
-        new ConcurrentHashMap<>();
-
-    EmptyExponentialHistogramBuckets() {}
-
-    static ExponentialHistogramBuckets get(int scale) {
-      return ZERO_BUCKETS.computeIfAbsent(
-          scale,
-          scale1 ->
-              new AutoValue_DoubleBase2ExponentialHistogramAggregator_EmptyExponentialHistogramBuckets(
-                  scale1, 0, Collections.emptyList(), 0));
     }
   }
 }

@@ -29,6 +29,8 @@ import java.util.logging.Logger;
  * so unless you know what you're doing, strongly consider using {@link BatchLogRecordProcessor}
  * instead, including in special environments such as serverless runtimes. {@link
  * SimpleLogRecordProcessor} is generally meant to for testing only.
+ *
+ * @since 1.27.0
  */
 public final class SimpleLogRecordProcessor implements LogRecordProcessor {
 
@@ -38,6 +40,8 @@ public final class SimpleLogRecordProcessor implements LogRecordProcessor {
   private final Set<CompletableResultCode> pendingExports =
       Collections.newSetFromMap(new ConcurrentHashMap<>());
   private final AtomicBoolean isShutdown = new AtomicBoolean(false);
+
+  private final Object exporterLock = new Object();
 
   /**
    * Returns a new {@link SimpleLogRecordProcessor} which exports logs to the {@link
@@ -54,7 +58,7 @@ public final class SimpleLogRecordProcessor implements LogRecordProcessor {
     return new SimpleLogRecordProcessor(exporter);
   }
 
-  SimpleLogRecordProcessor(LogRecordExporter logRecordExporter) {
+  private SimpleLogRecordProcessor(LogRecordExporter logRecordExporter) {
     this.logRecordExporter = requireNonNull(logRecordExporter, "logRecordExporter");
   }
 
@@ -62,7 +66,12 @@ public final class SimpleLogRecordProcessor implements LogRecordProcessor {
   public void onEmit(Context context, ReadWriteLogRecord logRecord) {
     try {
       List<LogRecordData> logs = Collections.singletonList(logRecord.toLogRecordData());
-      CompletableResultCode result = logRecordExporter.export(logs);
+      CompletableResultCode result;
+
+      synchronized (exporterLock) {
+        result = logRecordExporter.export(logs);
+      }
+
       pendingExports.add(result);
       result.whenComplete(
           () -> {
@@ -103,6 +112,15 @@ public final class SimpleLogRecordProcessor implements LogRecordProcessor {
   @Override
   public CompletableResultCode forceFlush() {
     return CompletableResultCode.ofAll(pendingExports);
+  }
+
+  /**
+   * Return the processor's configured {@link LogRecordExporter}.
+   *
+   * @since 1.37.0
+   */
+  public LogRecordExporter getLogRecordExporter() {
+    return logRecordExporter;
   }
 
   @Override

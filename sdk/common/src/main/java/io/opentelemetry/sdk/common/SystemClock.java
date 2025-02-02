@@ -6,9 +6,13 @@
 package io.opentelemetry.sdk.common;
 
 import io.opentelemetry.sdk.internal.JavaVersionSpecific;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.concurrent.ThreadSafe;
 
-/** A {@link Clock} that uses {@link System#currentTimeMillis()} and {@link System#nanoTime()}. */
+/**
+ * A {@link Clock} that uses {@link JavaVersionSpecific#currentTimeNanos()} and {@link
+ * System#nanoTime()}.
+ */
 @ThreadSafe
 final class SystemClock implements Clock {
 
@@ -16,18 +20,22 @@ final class SystemClock implements Clock {
 
   private SystemClock() {}
 
-  /**
-   * Returns a {@code MillisClock}.
-   *
-   * @return a {@code MillisClock}.
-   */
+  /** Returns a {@link SystemClock}. */
   static Clock getInstance() {
     return INSTANCE;
   }
 
   @Override
   public long now() {
-    return JavaVersionSpecific.get().currentTimeNanos();
+    return now(true);
+  }
+
+  @Override
+  public long now(boolean highPrecision) {
+    if (highPrecision) {
+      return JavaVersionSpecific.get().currentTimeNanos();
+    }
+    return TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis());
   }
 
   @Override

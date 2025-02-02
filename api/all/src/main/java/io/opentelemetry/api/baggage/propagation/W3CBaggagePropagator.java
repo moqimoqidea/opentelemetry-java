@@ -16,7 +16,9 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.context.propagation.TextMapSetter;
+import io.opentelemetry.context.propagation.internal.ExtendedTextMapGetter;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import javax.annotation.Nullable;
 
@@ -95,6 +97,14 @@ public final class W3CBaggagePropagator implements TextMapPropagator {
       return context;
     }
 
+    if (getter instanceof ExtendedTextMapGetter) {
+      return extractMulti(context, carrier, (ExtendedTextMapGetter<C>) getter);
+    }
+    return extractSingle(context, carrier, getter);
+  }
+
+  private static <C> Context extractSingle(
+      Context context, @Nullable C carrier, TextMapGetter<C> getter) {
     String baggageHeader = getter.get(carrier, FIELD);
     if (baggageHeader == null) {
       return context;
@@ -112,6 +122,33 @@ public final class W3CBaggagePropagator implements TextMapPropagator {
     return context.with(baggageBuilder.build());
   }
 
+  private static <C> Context extractMulti(
+      Context context, @Nullable C carrier, ExtendedTextMapGetter<C> getter) {
+    Iterator<String> baggageHeaders = getter.getAll(carrier, FIELD);
+    if (baggageHeaders == null) {
+      return context;
+    }
+
+    boolean extracted = false;
+    BaggageBuilder baggageBuilder = Baggage.builder();
+
+    while (baggageHeaders.hasNext()) {
+      String header = baggageHeaders.next();
+      if (header.isEmpty()) {
+        continue;
+      }
+
+      try {
+        extractEntries(header, baggageBuilder);
+        extracted = true;
+      } catch (RuntimeException expected) {
+        // invalid baggage header, continue
+      }
+    }
+
+    return extracted ? context.with(baggageBuilder.build()) : context;
+  }
+
   private static void extractEntries(String baggageHeader, BaggageBuilder baggageBuilder) {
     new Parser(baggageHeader).parseInto(baggageBuilder);
   }
@@ -127,7 +164,7 @@ public final class W3CBaggagePropagator implements TextMapPropagator {
    * @return whether the name is valid.
    */
   private static boolean isValidBaggageKey(String name) {
-    return name != null && !name.isEmpty() && StringUtils.isPrintableString(name);
+    return name != null && !name.trim().isEmpty() && StringUtils.isPrintableString(name);
   }
 
   /**

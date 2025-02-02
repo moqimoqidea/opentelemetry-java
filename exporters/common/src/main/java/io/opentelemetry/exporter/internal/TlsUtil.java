@@ -12,7 +12,6 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
-import java.security.KeyManagementException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
@@ -21,23 +20,18 @@ import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import javax.annotation.Nullable;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLException;
-import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
-import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 
 /**
  * Utilities for working with TLS.
@@ -67,29 +61,8 @@ public final class TlsUtil {
 
   private TlsUtil() {}
 
-  /** Returns a {@link SSLSocketFactory} configured to use the given key and trust manager. */
-  public static SSLSocketFactory sslSocketFactory(
-      @Nullable KeyManager keyManager, TrustManager trustManager) throws SSLException {
-
-    SSLContext sslContext;
-    try {
-      sslContext = SSLContext.getInstance("TLS");
-      if (keyManager == null) {
-        sslContext.init(null, new TrustManager[] {trustManager}, null);
-      } else {
-        sslContext.init(new KeyManager[] {keyManager}, new TrustManager[] {trustManager}, null);
-      }
-    } catch (NoSuchAlgorithmException | KeyManagementException e) {
-      throw new SSLException(
-          "Could not set trusted certificates for TLS connection, are they valid "
-              + "X.509 in PEM format?",
-          e);
-    }
-    return sslContext.getSocketFactory();
-  }
-
   /**
-   * Creates {@link KeyManager} initiaded by keystore containing single private key with matching
+   * Creates {@link KeyManager} initiated by keystore containing single private key with matching
    * certificate chain.
    */
   public static X509KeyManager keyManager(byte[] privateKeyPem, byte[] certificatePem)
@@ -103,14 +76,11 @@ public final class TlsUtil {
       PrivateKey key = generatePrivateKey(keySpec, SUPPORTED_KEY_FACTORIES);
 
       CertificateFactory cf = CertificateFactory.getInstance("X.509");
-
-      List<Certificate> chain = new ArrayList<>();
-
       ByteArrayInputStream is = new ByteArrayInputStream(certificatePem);
-      while (is.available() > 0) {
-        chain.add(cf.generateCertificate(is));
-      }
-
+      // pass the input stream to generateCertificates to get a list of certificates
+      // generateCertificates can handle multiple certificates in a single input stream
+      // including PEM files with explanatory text
+      List<? extends Certificate> chain = (List<? extends Certificate>) cf.generateCertificates(is);
       ks.setKeyEntry("trusted", key, "".toCharArray(), chain.toArray(new Certificate[] {}));
 
       KeyManagerFactory kmf =
@@ -152,9 +122,13 @@ public final class TlsUtil {
       ByteArrayInputStream is = new ByteArrayInputStream(trustedCertificatesPem);
       CertificateFactory factory = CertificateFactory.getInstance("X.509");
       int i = 0;
-      while (is.available() > 0) {
-        X509Certificate cert = (X509Certificate) factory.generateCertificate(is);
-        ks.setCertificateEntry("cert_" + i, cert);
+      // pass the input stream to generateCertificates to get a list of certificates
+      // generateCertificates can handle multiple certificates in a single input stream
+      // including PEM files with explanatory text
+      List<? extends Certificate> certificates =
+          (List<? extends Certificate>) factory.generateCertificates(is);
+      for (Certificate certificate : certificates) {
+        ks.setCertificateEntry("cert_" + i, certificate);
         i++;
       }
 
@@ -167,9 +141,6 @@ public final class TlsUtil {
     }
   }
 
-  // We catch linkage error to provide a better exception message on Android.
-  // https://github.com/open-telemetry/opentelemetry-java/issues/4533
-  @IgnoreJRERequirement
   // Visible for testing
   static byte[] decodePem(byte[] pem) {
     String pemStr = new String(pem, StandardCharsets.UTF_8).trim();
@@ -182,12 +153,6 @@ public final class TlsUtil {
         pemStr.substring(PEM_KEY_HEADER.length(), pemStr.length() - PEM_KEY_FOOTER.length());
     String content = contentWithNewLines.replaceAll("\\s", "");
 
-    try {
-      return Base64.getDecoder().decode(content);
-    } catch (LinkageError unused) {
-      throw new IllegalArgumentException(
-          "PEM private keys are currently not supported on Android. "
-              + "You may try a key encoded as DER.");
-    }
+    return Base64.getDecoder().decode(content);
   }
 }

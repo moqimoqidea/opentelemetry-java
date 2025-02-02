@@ -6,15 +6,23 @@
 package io.opentelemetry.sdk.metrics;
 
 import io.opentelemetry.sdk.common.Clock;
+import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
+import io.opentelemetry.sdk.internal.ScopeConfigurator;
+import io.opentelemetry.sdk.internal.ScopeConfiguratorBuilder;
+import io.opentelemetry.sdk.metrics.export.CardinalityLimitSelector;
+import io.opentelemetry.sdk.metrics.export.MetricProducer;
 import io.opentelemetry.sdk.metrics.export.MetricReader;
+import io.opentelemetry.sdk.metrics.internal.MeterConfig;
 import io.opentelemetry.sdk.metrics.internal.SdkMeterProviderUtil;
 import io.opentelemetry.sdk.metrics.internal.debug.SourceInfo;
 import io.opentelemetry.sdk.metrics.internal.exemplar.ExemplarFilter;
 import io.opentelemetry.sdk.metrics.internal.view.RegisteredView;
 import io.opentelemetry.sdk.resources.Resource;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Builder class for the {@link SdkMeterProvider}.
@@ -32,9 +40,13 @@ public final class SdkMeterProviderBuilder {
 
   private Clock clock = Clock.getDefault();
   private Resource resource = Resource.getDefault();
-  private final List<MetricReader> metricReaders = new ArrayList<>();
+  private final IdentityHashMap<MetricReader, CardinalityLimitSelector> metricReaders =
+      new IdentityHashMap<>();
+  private final List<MetricProducer> metricProducers = new ArrayList<>();
   private final List<RegisteredView> registeredViews = new ArrayList<>();
   private ExemplarFilter exemplarFilter = DEFAULT_EXEMPLAR_FILTER;
+  private ScopeConfiguratorBuilder<MeterConfig> meterConfiguratorBuilder =
+      MeterConfig.configuratorBuilder();
 
   SdkMeterProviderBuilder() {}
 
@@ -57,9 +69,21 @@ public final class SdkMeterProviderBuilder {
   }
 
   /**
+   * Merge a {@link Resource} with the current.
+   *
+   * @param resource {@link Resource} to merge with current.
+   * @since 1.29.0
+   */
+  public SdkMeterProviderBuilder addResource(Resource resource) {
+    Objects.requireNonNull(resource, "resource");
+    this.resource = this.resource.merge(resource);
+    return this;
+  }
+
+  /**
    * Assign an {@link ExemplarFilter} for all metrics created by Meters.
    *
-   * <p>Note: not currently stable but available for experimental use via {@link
+   * <p>This method is experimental so not public. You may reflectively call it using {@link
    * SdkMeterProviderUtil#setExemplarFilter(SdkMeterProviderBuilder, ExemplarFilter)}.
    */
   SdkMeterProviderBuilder setExemplarFilter(ExemplarFilter filter) {
@@ -82,7 +106,7 @@ public final class SdkMeterProviderBuilder {
    *
    * // register the view with the SdkMeterProviderBuilder
    * meterProviderBuilder.registerView(
-   *   InstrumentSelector instrumentSelector = InstrumentSelector.builder()
+   *   InstrumentSelector.builder()
    *       .setType(InstrumentType.HISTOGRAM)
    *       .build(),
    *   View.builder()
@@ -96,22 +120,93 @@ public final class SdkMeterProviderBuilder {
     Objects.requireNonNull(view, "view");
     registeredViews.add(
         RegisteredView.create(
-            selector, view, view.getAttributesProcessor(), SourceInfo.fromCurrentStack()));
+            selector,
+            view,
+            view.getAttributesProcessor(),
+            view.getCardinalityLimit(),
+            SourceInfo.fromCurrentStack()));
+    return this;
+  }
+
+  /** Registers a {@link MetricReader}. */
+  public SdkMeterProviderBuilder registerMetricReader(MetricReader reader) {
+    metricReaders.put(reader, CardinalityLimitSelector.defaultCardinalityLimitSelector());
     return this;
   }
 
   /**
-   * Registers a {@link MetricReader}.
+   * Registers a {@link MetricReader} with a {@link CardinalityLimitSelector}.
    *
-   * <p>Note: custom implementations of {@link MetricReader} are not currently supported.
+   * <p>If {@link #registerMetricReader(MetricReader)} is used, the {@link
+   * CardinalityLimitSelector#defaultCardinalityLimitSelector()} is used.
+   *
+   * @since 1.44.0
    */
-  public SdkMeterProviderBuilder registerMetricReader(MetricReader reader) {
-    metricReaders.add(reader);
+  public SdkMeterProviderBuilder registerMetricReader(
+      MetricReader reader, CardinalityLimitSelector cardinalityLimitSelector) {
+    metricReaders.put(reader, cardinalityLimitSelector);
+    return this;
+  }
+
+  /**
+   * Registers a {@link MetricProducer}.
+   *
+   * @since 1.31.0
+   */
+  public SdkMeterProviderBuilder registerMetricProducer(MetricProducer metricProducer) {
+    metricProducers.add(metricProducer);
+    return this;
+  }
+
+  /**
+   * Set the meter configurator, which computes {@link MeterConfig} for each {@link
+   * InstrumentationScopeInfo}.
+   *
+   * <p>This method is experimental so not public. You may reflectively call it using {@link
+   * SdkMeterProviderUtil#setMeterConfigurator(SdkMeterProviderBuilder, ScopeConfigurator)}.
+   *
+   * <p>Overrides any matchers added via {@link #addMeterConfiguratorCondition(Predicate,
+   * MeterConfig)}.
+   *
+   * @see MeterConfig#configuratorBuilder()
+   */
+  SdkMeterProviderBuilder setMeterConfigurator(ScopeConfigurator<MeterConfig> meterConfigurator) {
+    this.meterConfiguratorBuilder = meterConfigurator.toBuilder();
+    return this;
+  }
+
+  /**
+   * Adds a condition to the meter configurator, which computes {@link MeterConfig} for each {@link
+   * InstrumentationScopeInfo}.
+   *
+   * <p>This method is experimental so not public. You may reflectively call it using {@link
+   * SdkMeterProviderUtil#addMeterConfiguratorCondition(SdkMeterProviderBuilder, Predicate,
+   * MeterConfig)}.
+   *
+   * <p>Applies after any previously added conditions.
+   *
+   * <p>If {@link #setMeterConfigurator(ScopeConfigurator)} was previously called, this condition
+   * will only be applied if the {@link ScopeConfigurator#apply(Object)} returns null for the
+   * matched {@link InstrumentationScopeInfo}(s).
+   *
+   * @see ScopeConfiguratorBuilder#nameEquals(String)
+   * @see ScopeConfiguratorBuilder#nameMatchesGlob(String)
+   */
+  SdkMeterProviderBuilder addMeterConfiguratorCondition(
+      Predicate<InstrumentationScopeInfo> scopeMatcher, MeterConfig meterConfig) {
+    this.meterConfiguratorBuilder.addCondition(scopeMatcher, meterConfig);
     return this;
   }
 
   /** Returns an {@link SdkMeterProvider} built with the configuration of this builder. */
   public SdkMeterProvider build() {
-    return new SdkMeterProvider(registeredViews, metricReaders, clock, resource, exemplarFilter);
+    return new SdkMeterProvider(
+        registeredViews,
+        metricReaders,
+        metricProducers,
+        clock,
+        resource,
+        exemplarFilter,
+        meterConfiguratorBuilder.build());
   }
 }

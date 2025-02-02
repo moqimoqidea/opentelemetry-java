@@ -5,6 +5,8 @@
 
 package io.opentelemetry.sdk.autoconfigure;
 
+import io.opentelemetry.sdk.autoconfigure.internal.NamedSpiManager;
+import io.opentelemetry.sdk.autoconfigure.internal.SpiHelper;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigurationException;
 import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
@@ -25,6 +27,7 @@ final class SpanExporterConfiguration {
 
   static {
     EXPORTER_ARTIFACT_ID_BY_NAME = new HashMap<>();
+    EXPORTER_ARTIFACT_ID_BY_NAME.put("console", "opentelemetry-exporter-logging");
     EXPORTER_ARTIFACT_ID_BY_NAME.put("jaeger", "opentelemetry-exporter-jaeger");
     EXPORTER_ARTIFACT_ID_BY_NAME.put("logging", "opentelemetry-exporter-logging");
     EXPORTER_ARTIFACT_ID_BY_NAME.put("logging-otlp", "opentelemetry-exporter-logging-otlp");
@@ -35,7 +38,7 @@ final class SpanExporterConfiguration {
   // Visible for testing
   static Map<String, SpanExporter> configureSpanExporters(
       ConfigProperties config,
-      ClassLoader serviceClassLoader,
+      SpiHelper spiHelper,
       BiFunction<? super SpanExporter, ConfigProperties, ? extends SpanExporter>
           spanExporterCustomizer,
       List<Closeable> closeables) {
@@ -45,21 +48,14 @@ final class SpanExporterConfiguration {
         throw new ConfigurationException(
             "otel.traces.exporter contains " + EXPORTER_NONE + " along with other exporters");
       }
-      SpanExporter noop = SpanExporter.composite();
-      SpanExporter customized = spanExporterCustomizer.apply(noop, config);
-      if (customized == noop) {
-        return Collections.emptyMap();
-      }
-      closeables.add(customized);
-      return Collections.singletonMap(EXPORTER_NONE, customized);
+      return Collections.emptyMap();
     }
 
     if (exporterNames.isEmpty()) {
       exporterNames = Collections.singleton("otlp");
     }
 
-    NamedSpiManager<SpanExporter> spiExportersManager =
-        spanExporterSpiManager(config, serviceClassLoader);
+    NamedSpiManager<SpanExporter> spiExportersManager = spanExporterSpiManager(config, spiHelper);
 
     Map<String, SpanExporter> map = new HashMap<>();
     for (String exporterName : exporterNames) {
@@ -76,13 +72,12 @@ final class SpanExporterConfiguration {
 
   // Visible for testing
   static NamedSpiManager<SpanExporter> spanExporterSpiManager(
-      ConfigProperties config, ClassLoader serviceClassLoader) {
-    return SpiUtil.loadConfigurable(
+      ConfigProperties config, SpiHelper spiHelper) {
+    return spiHelper.loadConfigurable(
         ConfigurableSpanExporterProvider.class,
         ConfigurableSpanExporterProvider::getName,
         ConfigurableSpanExporterProvider::createExporter,
-        config,
-        serviceClassLoader);
+        config);
   }
 
   // Visible for testing

@@ -5,11 +5,13 @@
 
 package io.opentelemetry.integrationtest;
 
+import static io.opentelemetry.api.common.Value.of;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.testcontainers.Testcontainers.exposeHostPorts;
 
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.ServiceRequestContext;
@@ -17,8 +19,10 @@ import com.linecorp.armeria.server.grpc.protocol.AbstractUnaryGrpcService;
 import com.linecorp.armeria.testing.junit5.server.SelfSignedCertificateExtension;
 import com.linecorp.armeria.testing.junit5.server.ServerExtension;
 import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.events.EventEmitter;
+import io.opentelemetry.api.common.KeyValue;
+import io.opentelemetry.api.incubator.logs.ExtendedLogRecordBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.metrics.LongCounter;
@@ -44,7 +48,8 @@ import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
 import io.opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse;
 import io.opentelemetry.proto.common.v1.AnyValue;
-import io.opentelemetry.proto.common.v1.KeyValue;
+import io.opentelemetry.proto.common.v1.ArrayValue;
+import io.opentelemetry.proto.common.v1.KeyValueList;
 import io.opentelemetry.proto.logs.v1.ResourceLogs;
 import io.opentelemetry.proto.logs.v1.ScopeLogs;
 import io.opentelemetry.proto.metrics.v1.AggregationTemporality;
@@ -56,26 +61,29 @@ import io.opentelemetry.proto.metrics.v1.Sum;
 import io.opentelemetry.proto.trace.v1.ResourceSpans;
 import io.opentelemetry.proto.trace.v1.ScopeSpans;
 import io.opentelemetry.proto.trace.v1.Span.Link;
-import io.opentelemetry.sdk.logs.SdkEventEmitterProvider;
+import io.opentelemetry.sdk.common.export.MemoryMode;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.SdkMeterProviderBuilder;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
+import io.opentelemetry.sdk.metrics.internal.SdkMeterProviderUtil;
+import io.opentelemetry.sdk.metrics.internal.exemplar.ExemplarFilter;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.IdGenerator;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
-import io.opentelemetry.semconv.resource.attributes.ResourceAttributes;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -83,6 +91,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.BindMode;
@@ -103,6 +112,8 @@ import org.testcontainers.utility.MountableFile;
 @Testcontainers(disabledWithoutDocker = true)
 abstract class OtlpExporterIntegrationTest {
 
+  private static final AttributeKey<String> SERVICE_NAME = AttributeKey.stringKey("service.name");
+
   private static final String COLLECTOR_IMAGE =
       "ghcr.io/open-telemetry/opentelemetry-java/otel-collector";
   private static final Integer COLLECTOR_OTLP_GRPC_PORT = 4317;
@@ -111,9 +122,7 @@ abstract class OtlpExporterIntegrationTest {
   private static final Integer COLLECTOR_OTLP_HTTP_MTLS_PORT = 5318;
   private static final Integer COLLECTOR_HEALTH_CHECK_PORT = 13133;
   private static final Resource RESOURCE =
-      Resource.getDefault().toBuilder()
-          .put(ResourceAttributes.SERVICE_NAME, "integration test")
-          .build();
+      Resource.getDefault().toBuilder().put(SERVICE_NAME, "integration test").build();
 
   @RegisterExtension
   static final SelfSignedCertificateExtension serverTls = new SelfSignedCertificateExtension();
@@ -121,7 +130,10 @@ abstract class OtlpExporterIntegrationTest {
   @RegisterExtension
   static final SelfSignedCertificateExtension clientTls = new SelfSignedCertificateExtension();
 
+  @SuppressWarnings("NonFinalStaticField")
   private static OtlpGrpcServer grpcServer;
+
+  @SuppressWarnings("NonFinalStaticField")
   private static GenericContainer<?> collector;
 
   @BeforeAll
@@ -182,7 +194,7 @@ abstract class OtlpExporterIntegrationTest {
   @ParameterizedTest
   @ValueSource(strings = {"gzip", "none"})
   void testOtlpGrpcTraceExport(String compression) {
-    SpanExporter otlpGrpcTraceExporter =
+    SpanExporter exporter =
         OtlpGrpcSpanExporter.builder()
             .setEndpoint(
                 "http://"
@@ -192,7 +204,23 @@ abstract class OtlpExporterIntegrationTest {
             .setCompression(compression)
             .build();
 
-    testTraceExport(otlpGrpcTraceExporter);
+    testTraceExport(exporter);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpGrpcTraceExport_memoryMode(MemoryMode memoryMode) {
+    SpanExporter exporter =
+        OtlpGrpcSpanExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_GRPC_PORT))
+            .setMemoryMode(memoryMode)
+            .build();
+
+    testTraceExport(exporter);
   }
 
   @Test
@@ -214,7 +242,7 @@ abstract class OtlpExporterIntegrationTest {
   @ParameterizedTest
   @ValueSource(strings = {"gzip", "none"})
   void testOtlpHttpTraceExport(String compression) {
-    SpanExporter otlpGrpcTraceExporter =
+    SpanExporter exporter =
         OtlpHttpSpanExporter.builder()
             .setEndpoint(
                 "http://"
@@ -225,7 +253,24 @@ abstract class OtlpExporterIntegrationTest {
             .setCompression(compression)
             .build();
 
-    testTraceExport(otlpGrpcTraceExporter);
+    testTraceExport(exporter);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpHttpTraceExport_memoryMode(MemoryMode memoryMode) {
+    SpanExporter exporter =
+        OtlpHttpSpanExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_HTTP_PORT)
+                    + "/v1/traces")
+            .setMemoryMode(memoryMode)
+            .build();
+
+    testTraceExport(exporter);
   }
 
   @Test
@@ -281,8 +326,8 @@ abstract class OtlpExporterIntegrationTest {
     ResourceSpans resourceSpans = request.getResourceSpans(0);
     assertThat(resourceSpans.getResource().getAttributesList())
         .contains(
-            KeyValue.newBuilder()
-                .setKey(ResourceAttributes.SERVICE_NAME.getKey())
+            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                .setKey(SERVICE_NAME.getKey())
                 .setValue(AnyValue.newBuilder().setStringValue("integration test").build())
                 .build());
     assertThat(resourceSpans.getScopeSpansCount()).isEqualTo(1);
@@ -300,7 +345,7 @@ abstract class OtlpExporterIntegrationTest {
     assertThat(protoSpan.getAttributesList())
         .isEqualTo(
             Collections.singletonList(
-                KeyValue.newBuilder()
+                io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
                     .setKey("key")
                     .setValue(AnyValue.newBuilder().setStringValue("value").build())
                     .build()));
@@ -315,7 +360,7 @@ abstract class OtlpExporterIntegrationTest {
   @ParameterizedTest
   @ValueSource(strings = {"gzip", "none"})
   void testOtlpGrpcMetricExport(String compression) {
-    MetricExporter otlpGrpcMetricExporter =
+    MetricExporter exporter =
         OtlpGrpcMetricExporter.builder()
             .setEndpoint(
                 "http://"
@@ -325,7 +370,24 @@ abstract class OtlpExporterIntegrationTest {
             .setCompression(compression)
             .build();
 
-    testMetricExport(otlpGrpcMetricExporter);
+    testMetricExport(exporter);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpGrpcMetricExport_memoryMode(MemoryMode memoryMode) {
+    MetricExporter exporter =
+        OtlpGrpcMetricExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_GRPC_PORT))
+            .setMemoryMode(memoryMode)
+            .build();
+    assertThat(exporter.getMemoryMode()).isEqualTo(memoryMode);
+
+    testMetricExport(exporter);
   }
 
   @Test
@@ -347,7 +409,8 @@ abstract class OtlpExporterIntegrationTest {
   @ParameterizedTest
   @ValueSource(strings = {"gzip", "none"})
   void testOtlpHttpMetricExport(String compression) {
-    MetricExporter otlpGrpcMetricExporter =
+
+    MetricExporter exporter =
         OtlpHttpMetricExporter.builder()
             .setEndpoint(
                 "http://"
@@ -358,7 +421,25 @@ abstract class OtlpExporterIntegrationTest {
             .setCompression(compression)
             .build();
 
-    testMetricExport(otlpGrpcMetricExporter);
+    testMetricExport(exporter);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpHttpMetricExport_memoryMode(MemoryMode memoryMode) {
+    MetricExporter exporter =
+        OtlpHttpMetricExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_HTTP_PORT)
+                    + "/v1/metrics")
+            .setMemoryMode(memoryMode)
+            .build();
+    assertThat(exporter.getMemoryMode()).isEqualTo(memoryMode);
+
+    testMetricExport(exporter);
   }
 
   @Test
@@ -379,14 +460,18 @@ abstract class OtlpExporterIntegrationTest {
   }
 
   private static void testMetricExport(MetricExporter metricExporter) {
-    SdkMeterProvider meterProvider =
+    SdkMeterProviderBuilder meterProviderBuilder =
         SdkMeterProvider.builder()
             .setResource(RESOURCE)
             .registerMetricReader(
                 PeriodicMetricReader.builder(metricExporter)
                     .setInterval(Duration.ofSeconds(Integer.MAX_VALUE))
-                    .build())
-            .build();
+                    .build());
+
+    // Enable alwaysOn exemplar filter, instead of default traceBased filter
+    SdkMeterProviderUtil.setExemplarFilter(meterProviderBuilder, ExemplarFilter.alwaysOn());
+
+    SdkMeterProvider meterProvider = meterProviderBuilder.build();
 
     Meter meter = meterProvider.meterBuilder(OtlpExporterIntegrationTest.class.getName()).build();
 
@@ -406,8 +491,8 @@ abstract class OtlpExporterIntegrationTest {
     ResourceMetrics resourceMetrics = request.getResourceMetrics(0);
     assertThat(resourceMetrics.getResource().getAttributesList())
         .contains(
-            KeyValue.newBuilder()
-                .setKey(ResourceAttributes.SERVICE_NAME.getKey())
+            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                .setKey(SERVICE_NAME.getKey())
                 .setValue(AnyValue.newBuilder().setStringValue("integration test").build())
                 .build());
     assertThat(resourceMetrics.getScopeMetricsCount()).isEqualTo(1);
@@ -431,10 +516,11 @@ abstract class OtlpExporterIntegrationTest {
     assertThat(dataPoint.getAttributesList())
         .isEqualTo(
             Collections.singletonList(
-                KeyValue.newBuilder()
+                io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
                     .setKey("key")
                     .setValue(AnyValue.newBuilder().setStringValue("value").build())
                     .build()));
+    assertThat(dataPoint.getExemplarsCount()).isEqualTo(1);
   }
 
   @ParameterizedTest
@@ -448,6 +534,22 @@ abstract class OtlpExporterIntegrationTest {
                     + ":"
                     + collector.getMappedPort(COLLECTOR_OTLP_GRPC_PORT))
             .setCompression(compression)
+            .build();
+
+    testLogRecordExporter(otlpGrpcLogRecordExporter);
+  }
+
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpGrpcLogExport_memoryMode(MemoryMode memoryMode) {
+    LogRecordExporter otlpGrpcLogRecordExporter =
+        OtlpGrpcLogRecordExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_GRPC_PORT))
+            .setMemoryMode(memoryMode)
             .build();
 
     testLogRecordExporter(otlpGrpcLogRecordExporter);
@@ -486,6 +588,23 @@ abstract class OtlpExporterIntegrationTest {
     testLogRecordExporter(otlpHttpLogRecordExporter);
   }
 
+  @ParameterizedTest
+  @EnumSource(MemoryMode.class)
+  void testOtlpHttpLogExport_memoryMode(MemoryMode memoryMode) {
+    LogRecordExporter otlpHttpLogRecordExporter =
+        OtlpHttpLogRecordExporter.builder()
+            .setEndpoint(
+                "http://"
+                    + collector.getHost()
+                    + ":"
+                    + collector.getMappedPort(COLLECTOR_OTLP_HTTP_PORT)
+                    + "/v1/logs")
+            .setMemoryMode(memoryMode)
+            .build();
+
+    testLogRecordExporter(otlpHttpLogRecordExporter);
+  }
+
   @Test
   void testOtlpHttpLogExport_mtls() throws Exception {
     LogRecordExporter exporter =
@@ -503,6 +622,7 @@ abstract class OtlpExporterIntegrationTest {
     testLogRecordExporter(exporter);
   }
 
+  @SuppressWarnings("BadImport")
   private static void testLogRecordExporter(LogRecordExporter logRecordExporter) {
     SdkLoggerProvider loggerProvider =
         SdkLoggerProvider.builder()
@@ -514,11 +634,6 @@ abstract class OtlpExporterIntegrationTest {
             .build();
 
     Logger logger = loggerProvider.get(OtlpExporterIntegrationTest.class.getName());
-    EventEmitter eventEmitter =
-        SdkEventEmitterProvider.create(loggerProvider)
-            .eventEmitterBuilder(OtlpExporterIntegrationTest.class.getName())
-            .setEventDomain("event-domain")
-            .build();
 
     SpanContext spanContext =
         SpanContext.create(
@@ -527,17 +642,30 @@ abstract class OtlpExporterIntegrationTest {
             TraceFlags.getDefault(),
             TraceState.getDefault());
 
-    try (Scope unused = Span.wrap(spanContext).makeCurrent()) {
-      logger
-          .logRecordBuilder()
-          .setBody("log body")
+    try (Scope ignored = Span.wrap(spanContext).makeCurrent()) {
+      ((ExtendedLogRecordBuilder) logger.logRecordBuilder())
+          .setEventName("event name")
+          .setBody(
+              of(
+                  KeyValue.of("str_key", of("value")),
+                  KeyValue.of("bool_key", of(true)),
+                  KeyValue.of("int_key", of(1L)),
+                  KeyValue.of("double_key", of(1.1)),
+                  KeyValue.of("bytes_key", of("value".getBytes(StandardCharsets.UTF_8))),
+                  KeyValue.of("arr_key", of(of("value"), of(1L))),
+                  KeyValue.of(
+                      "kv_list",
+                      of(
+                          KeyValue.of("child_str_key", of("value")),
+                          KeyValue.of(
+                              "child_kv_list",
+                              of(KeyValue.of("grandchild_str_key", of("value"))))))))
+          .setTimestamp(100, TimeUnit.NANOSECONDS)
           .setAllAttributes(Attributes.builder().put("key", "value").build())
           .setSeverity(Severity.DEBUG)
           .setSeverityText("DEBUG")
-          .setEpoch(Instant.now())
           .setContext(Context.current())
           .emit();
-      eventEmitter.emit("event-name", Attributes.builder().put("key", "value").build());
     }
 
     // Closing triggers flush of processor
@@ -553,23 +681,119 @@ abstract class OtlpExporterIntegrationTest {
     ResourceLogs resourceLogs = request.getResourceLogs(0);
     assertThat(resourceLogs.getResource().getAttributesList())
         .contains(
-            KeyValue.newBuilder()
-                .setKey(ResourceAttributes.SERVICE_NAME.getKey())
+            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                .setKey(SERVICE_NAME.getKey())
                 .setValue(AnyValue.newBuilder().setStringValue("integration test").build())
                 .build());
     assertThat(resourceLogs.getScopeLogsCount()).isEqualTo(1);
 
     ScopeLogs ilLogs = resourceLogs.getScopeLogs(0);
     assertThat(ilLogs.getScope().getName()).isEqualTo(OtlpExporterIntegrationTest.class.getName());
-    assertThat(ilLogs.getLogRecordsCount()).isEqualTo(2);
+    assertThat(ilLogs.getLogRecordsCount()).isEqualTo(1);
 
     // LogRecord via Logger.logRecordBuilder()...emit()
     io.opentelemetry.proto.logs.v1.LogRecord protoLog1 = ilLogs.getLogRecords(0);
-    assertThat(protoLog1.getBody().getStringValue()).isEqualTo("log body");
+    assertThat(protoLog1.getEventName()).isEqualTo("event name");
+    assertThat(protoLog1.getBody())
+        .isEqualTo(
+            AnyValue.newBuilder()
+                .setKvlistValue(
+                    KeyValueList.newBuilder()
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("str_key")
+                                .setValue(AnyValue.newBuilder().setStringValue("value").build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("bool_key")
+                                .setValue(AnyValue.newBuilder().setBoolValue(true).build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("int_key")
+                                .setValue(AnyValue.newBuilder().setIntValue(1).build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("double_key")
+                                .setValue(AnyValue.newBuilder().setDoubleValue(1.1).build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("bytes_key")
+                                .setValue(
+                                    AnyValue.newBuilder()
+                                        .setBytesValue(
+                                            ByteString.copyFrom(
+                                                "value".getBytes(StandardCharsets.UTF_8)))
+                                        .build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("arr_key")
+                                .setValue(
+                                    AnyValue.newBuilder()
+                                        .setArrayValue(
+                                            ArrayValue.newBuilder()
+                                                .addValues(
+                                                    AnyValue.newBuilder()
+                                                        .setStringValue("value")
+                                                        .build())
+                                                .addValues(
+                                                    AnyValue.newBuilder().setIntValue(1).build())
+                                                .build())
+                                        .build())
+                                .build())
+                        .addValues(
+                            io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
+                                .setKey("kv_list")
+                                .setValue(
+                                    AnyValue.newBuilder()
+                                        .setKvlistValue(
+                                            KeyValueList.newBuilder()
+                                                .addValues(
+                                                    io.opentelemetry.proto.common.v1.KeyValue
+                                                        .newBuilder()
+                                                        .setKey("child_str_key")
+                                                        .setValue(
+                                                            AnyValue.newBuilder()
+                                                                .setStringValue("value")
+                                                                .build())
+                                                        .build())
+                                                .addValues(
+                                                    io.opentelemetry.proto.common.v1.KeyValue
+                                                        .newBuilder()
+                                                        .setKey("child_kv_list")
+                                                        .setValue(
+                                                            AnyValue.newBuilder()
+                                                                .setKvlistValue(
+                                                                    KeyValueList.newBuilder()
+                                                                        .addValues(
+                                                                            io.opentelemetry.proto
+                                                                                .common.v1.KeyValue
+                                                                                .newBuilder()
+                                                                                .setKey(
+                                                                                    "grandchild_str_key")
+                                                                                .setValue(
+                                                                                    AnyValue
+                                                                                        .newBuilder()
+                                                                                        .setStringValue(
+                                                                                            "value")
+                                                                                        .build())
+                                                                                .build())
+                                                                        .build())
+                                                                .build())
+                                                        .build())
+                                                .build())
+                                        .build())
+                                .build())
+                        .build())
+                .build());
     assertThat(protoLog1.getAttributesList())
         .isEqualTo(
             Collections.singletonList(
-                KeyValue.newBuilder()
+                io.opentelemetry.proto.common.v1.KeyValue.newBuilder()
                     .setKey("key")
                     .setValue(AnyValue.newBuilder().setStringValue("value").build())
                     .build()));
@@ -582,33 +806,7 @@ abstract class OtlpExporterIntegrationTest {
         .isEqualTo(spanContext.getSpanId());
     assertThat(TraceFlags.fromByte((byte) protoLog1.getFlags()))
         .isEqualTo(spanContext.getTraceFlags());
-    assertThat(protoLog1.getTimeUnixNano()).isGreaterThan(0);
-
-    // LogRecord via EventEmitter.emit(String, Attributes)
-    io.opentelemetry.proto.logs.v1.LogRecord protoLog2 = ilLogs.getLogRecords(1);
-    assertThat(protoLog2.getBody().getStringValue()).isEmpty();
-    assertThat(protoLog2.getAttributesList())
-        .containsExactlyInAnyOrder(
-            KeyValue.newBuilder()
-                .setKey("event.domain")
-                .setValue(AnyValue.newBuilder().setStringValue("event-domain").build())
-                .build(),
-            KeyValue.newBuilder()
-                .setKey("event.name")
-                .setValue(AnyValue.newBuilder().setStringValue("event-name").build())
-                .build(),
-            KeyValue.newBuilder()
-                .setKey("key")
-                .setValue(AnyValue.newBuilder().setStringValue("value").build())
-                .build());
-    assertThat(protoLog2.getSeverityText()).isEmpty();
-    assertThat(TraceId.fromBytes(protoLog2.getTraceId().toByteArray()))
-        .isEqualTo(spanContext.getTraceId());
-    assertThat(SpanId.fromBytes(protoLog2.getSpanId().toByteArray()))
-        .isEqualTo(spanContext.getSpanId());
-    assertThat(TraceFlags.fromByte((byte) protoLog2.getFlags()))
-        .isEqualTo(spanContext.getTraceFlags());
-    assertThat(protoLog2.getTimeUnixNano()).isGreaterThan(0);
+    assertThat(protoLog1.getTimeUnixNano()).isEqualTo(100);
   }
 
   private static class OtlpGrpcServer extends ServerExtension {

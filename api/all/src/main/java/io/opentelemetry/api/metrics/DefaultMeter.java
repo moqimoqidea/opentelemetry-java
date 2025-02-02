@@ -6,7 +6,6 @@
 package io.opentelemetry.api.metrics;
 
 import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.internal.ValidationUtil;
 import io.opentelemetry.context.Context;
 import java.util.function.Consumer;
 import javax.annotation.concurrent.ThreadSafe;
@@ -39,25 +38,21 @@ class DefaultMeter implements Meter {
 
   @Override
   public LongCounterBuilder counterBuilder(String name) {
-    ValidationUtil.checkValidInstrumentName(name);
     return NOOP_LONG_COUNTER_BUILDER;
   }
 
   @Override
   public LongUpDownCounterBuilder upDownCounterBuilder(String name) {
-    ValidationUtil.checkValidInstrumentName(name);
     return NOOP_LONG_UP_DOWN_COUNTER_BUILDER;
   }
 
   @Override
   public DoubleHistogramBuilder histogramBuilder(String name) {
-    ValidationUtil.checkValidInstrumentName(name);
     return NOOP_DOUBLE_HISTOGRAM_BUILDER;
   }
 
   @Override
   public DoubleGaugeBuilder gaugeBuilder(String name) {
-    ValidationUtil.checkValidInstrumentName(name);
     return NOOP_DOUBLE_GAUGE_BUILDER;
   }
 
@@ -107,7 +102,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public LongCounterBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -144,7 +138,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public DoubleCounterBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -201,7 +194,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public LongUpDownCounterBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -240,7 +232,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public DoubleUpDownCounterBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -295,7 +286,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public DoubleHistogramBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -320,7 +310,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public LongHistogramBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -331,8 +320,10 @@ class DefaultMeter implements Meter {
   }
 
   private static class NoopDoubleGaugeBuilder implements DoubleGaugeBuilder {
-    private static final ObservableDoubleGauge NOOP = new ObservableDoubleGauge() {};
+    private static final ObservableDoubleGauge NOOP_OBSERVABLE_GAUGE =
+        new ObservableDoubleGauge() {};
     private static final LongGaugeBuilder NOOP_LONG_GAUGE_BUILDER = new NoopLongGaugeBuilder();
+    private static final NoopDoubleGauge NOOP_GAUGE = new NoopDoubleGauge();
 
     @Override
     public DoubleGaugeBuilder setDescription(String description) {
@@ -341,7 +332,6 @@ class DefaultMeter implements Meter {
 
     @Override
     public DoubleGaugeBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
@@ -352,17 +342,34 @@ class DefaultMeter implements Meter {
 
     @Override
     public ObservableDoubleGauge buildWithCallback(Consumer<ObservableDoubleMeasurement> callback) {
-      return NOOP;
+      return NOOP_OBSERVABLE_GAUGE;
     }
 
     @Override
     public ObservableDoubleMeasurement buildObserver() {
       return NOOP_OBSERVABLE_DOUBLE_MEASUREMENT;
     }
+
+    @Override
+    public DoubleGauge build() {
+      return NOOP_GAUGE;
+    }
+  }
+
+  private static class NoopDoubleGauge implements DoubleGauge {
+    @Override
+    public void set(double value) {}
+
+    @Override
+    public void set(double value, Attributes attributes) {}
+
+    @Override
+    public void set(double value, Attributes attributes, Context context) {}
   }
 
   private static class NoopLongGaugeBuilder implements LongGaugeBuilder {
-    private static final ObservableLongGauge NOOP = new ObservableLongGauge() {};
+    private static final ObservableLongGauge NOOP_OBSERVABLE_GAUGE = new ObservableLongGauge() {};
+    private static final NoopLongGauge NOOP_GAUGE = new NoopLongGauge();
 
     @Override
     public LongGaugeBuilder setDescription(String description) {
@@ -371,19 +378,34 @@ class DefaultMeter implements Meter {
 
     @Override
     public LongGaugeBuilder setUnit(String unit) {
-      ValidationUtil.checkValidInstrumentUnit(unit);
       return this;
     }
 
     @Override
     public ObservableLongGauge buildWithCallback(Consumer<ObservableLongMeasurement> callback) {
-      return NOOP;
+      return NOOP_OBSERVABLE_GAUGE;
     }
 
     @Override
     public ObservableLongMeasurement buildObserver() {
       return NOOP_OBSERVABLE_LONG_MEASUREMENT;
     }
+
+    @Override
+    public LongGauge build() {
+      return NOOP_GAUGE;
+    }
+  }
+
+  private static class NoopLongGauge implements LongGauge {
+    @Override
+    public void set(long value) {}
+
+    @Override
+    public void set(long value, Attributes attributes) {}
+
+    @Override
+    public void set(long value, Attributes attributes, Context context) {}
   }
 
   private static class NoopObservableDoubleMeasurement implements ObservableDoubleMeasurement {

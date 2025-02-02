@@ -1,8 +1,6 @@
 plugins {
   id("otel.java-conventions")
   id("otel.publish-conventions")
-
-  id("otel.animalsniffer-conventions")
 }
 
 description = "OpenTelemetry Prometheus Exporter"
@@ -11,19 +9,25 @@ otelJava.moduleName.set("io.opentelemetry.exporter.prometheus")
 dependencies {
   api(project(":sdk:metrics"))
 
+  implementation(project(":exporters:common"))
   implementation(project(":sdk-extensions:autoconfigure-spi"))
+  implementation("io.prometheus:prometheus-metrics-exporter-httpserver")
 
-  compileOnly("com.sun.net.httpserver:http")
+  compileOnly("com.google.auto.value:auto-value-annotations")
 
-  testImplementation(project(":semconv"))
+  annotationProcessor("com.google.auto.value:auto-value")
 
+  testImplementation(project(":sdk:testing"))
   testImplementation("io.opentelemetry.proto:opentelemetry-proto")
-
+  testImplementation("io.prometheus:prometheus-metrics-shaded-protobuf")
+  testImplementation("io.prometheus:prometheus-metrics-exposition-formats")
+  testImplementation("com.sun.net.httpserver:http")
   testImplementation("com.google.guava:guava")
   testImplementation("com.linecorp.armeria:armeria")
   testImplementation("com.linecorp.armeria:armeria-junit5")
   testImplementation("com.linecorp.armeria:armeria-grpc-protocol")
   testImplementation("com.fasterxml.jackson.jr:jackson-jr-stree")
+  testImplementation("com.fasterxml.jackson.jr:jackson-jr-objects")
   testImplementation("org.testcontainers:junit-jupiter")
 }
 
@@ -37,7 +41,7 @@ tasks {
 
 testing {
   suites {
-    val testJpms by registering(JvmTestSuite::class) {
+    register<JvmTestSuite>("testJpms") {
       targets {
         all {
           testTask.configure {
@@ -77,7 +81,7 @@ tasks {
     exclude("module-info.java")
   }
 
-  val compileModuleJava by existing(JavaCompile::class) {
+  named<JavaCompile>("compileModuleJava") {
     with(options) {
       release.set(9)
     }
